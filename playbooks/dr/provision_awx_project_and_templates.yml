@@ -1,0 +1,223 @@
+---
+# Provisions the AWX Project (GitLab-backed OR manual/local-path - your
+# choice, see awx_project_scm_type below), a minimal localhost Inventory
+# (PowerScale modules talk to clusters over REST API, not SSH - no real
+# managed hosts needed), and the 3 Job Templates this repo currently ships:
+#   - PowerScale - Validate Input
+#   - PowerScale - Provision Share (Dry Run)
+#   - PowerScale - Provision Share
+#
+# Run this ONCE per environment (idempotent - safe to re-run, matches on
+# name). Needs the awx.awx collection - same offline install pattern as
+# credential_types_powerscale_sites.yml, see that file's header and
+# INWI-DR-Deployment-Runbook-*.md Step 5a.
+#
+# AWX API auth: username + password (matches this engagement's established
+# pattern). Pass via -e, environment variables, or a controller_config_file -
+# see the awx.awx collection's normal auth options. Self-signed cert on AWX
+# itself, same as everywhere else in this environment - controller_verify_ssl
+# defaults to false below.
+#
+# NOTE: like credential_types_powerscale_sites.yml, this stands alone
+# because the existing bootstrap_awx_inwi_dr.yml isn't available in this
+# repo yet - see playbooks/dr/README.md. Consider merging once retrieved.
+#
+# NOT YET WRITTEN AGAINST A REAL AWX: built and syntax-checked against the
+# documented awx.awx module schemas (verified against the 24.6.1 docs,
+# matching the AWX version in this environment), but this sandbox has no
+# awx.awx collection available to test end-to-end - same limitation
+# credential_types_powerscale_sites.yml already carries. Review the plan
+# with --check or a dry look at the AWX UI after first run before trusting
+# it blindly in a scripted pipeline.
+
+- name: Provision AWX Project and Job Templates for PowerScale DR automation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - awx.awx
+
+  vars:
+    # ---- AWX connection (override via -e) ----
+    controller_host: "https://awx.inwi.lan"
+    controller_username: "admin"
+    # controller_password: pass via -e, never commit it
+    controller_verify_ssl: false
+
+    # ---- Shared ----
+    # CHANGE ME: must already exist - this playbook does not create
+    # Organizations, only references one by name.
+    awx_organization: "Default"
+    awx_project_name: "inwi-powerscale-dr-automation"
+    ee_name: "PowerScale EE"
+    awx_inventory_name: "PowerScale DR - Localhost"
+
+    # ---- Project type: REQUIRED, no default on purpose - forces an
+    # ---- explicit choice each run rather than silently defaulting.
+    # awx_project_scm_type: "git"     # GitLab-backed - also set:
+    #   awx_project_scm_url: "https://gitlab.inwi.local/<group>/inwi-powerscale-dr-automation.git"
+    #   awx_project_scm_branch: "main"
+    #   gitlab_pat_token: "<token>"          # pass via -e, never commit
+    #   gitlab_pat_username: "oauth2"        # or your GitLab username - see runbook
+    #
+    # awx_project_scm_type: "manual"  # local path - also set:
+    #   awx_project_local_path: "inwi-powerscale-dr-automation"  # matches the
+    #     directory name you kubectl cp'd into /var/lib/awx/projects/
+
+    # ---- Credential attachment for the two provision_share templates.
+    # Leave false until the "PowerScale - Site A" / "PowerScale - Site B"
+    # Credentials actually exist (see credential_types_powerscale_sites.yml
+    # + creating the real Credentials in the AWX UI) - re-run this playbook
+    # with it set true afterward to attach them; safe/idempotent either way.
+    attach_site_credentials: false
+    site_a_credential_name: "PowerScale - Site A"
+    site_b_credential_name: "PowerScale - Site B"
+
+  tasks:
+    - name: Assert awx_project_scm_type was explicitly set
+      ansible.builtin.assert:
+        that:
+          - awx_project_scm_type is defined
+          - awx_project_scm_type in ['git', 'manual']
+        fail_msg: >-
+          Set -e awx_project_scm_type=git (GitLab-backed) or
+          -e awx_project_scm_type=manual (local path) - see this file's
+          header for the additional vars each mode needs.
+
+    # ---- GitLab-backed project ----
+    - name: Assert GitLab-specific vars are set
+      ansible.builtin.assert:
+        that:
+          - awx_project_scm_url is defined
+          - gitlab_pat_token is defined
+        fail_msg: >-
+          scm_type=git needs awx_project_scm_url and gitlab_pat_token set
+          (-e or environment) - see INWI-DR-Deployment-Runbook-GitLab.md.
+      when: awx_project_scm_type == 'git'
+
+    - name: Create/update the GitLab Source Control credential (PAT over HTTPS)
+      awx.awx.credential:
+        name: "GitLab - INWI Internal (PAT)"
+        organization: "{{ awx_organization }}"
+        credential_type: "Source Control"
+        inputs:
+          username: "{{ gitlab_pat_username | default('oauth2') }}"
+          password: "{{ gitlab_pat_token }}"
+        state: present
+      when: awx_project_scm_type == 'git'
+      no_log: true
+
+    - name: Create/update the GitLab-backed Project
+      awx.awx.project:
+        name: "{{ awx_project_name }}"
+        organization: "{{ awx_organization }}"
+        scm_type: git
+        scm_url: "{{ awx_project_scm_url }}"
+        scm_branch: "{{ awx_project_scm_branch | default('main') }}"
+        credential: "GitLab - INWI Internal (PAT)"
+        scm_update_on_launch: true
+        scm_clean: true
+        wait: true
+        state: present
+      when: awx_project_scm_type == 'git'
+
+    # ---- Manual (local path) project ----
+    - name: Assert manual-mode var is set
+      ansible.builtin.assert:
+        that:
+          - awx_project_local_path is defined
+        fail_msg: >-
+          scm_type=manual needs awx_project_local_path set - the directory
+          name under /var/lib/awx/projects you kubectl cp'd the repo into.
+          See INWI-DR-Deployment-Runbook-Local.md.
+      when: awx_project_scm_type == 'manual'
+
+    - name: Create/update the manual (local path) Project
+      awx.awx.project:
+        name: "{{ awx_project_name }}"
+        organization: "{{ awx_organization }}"
+        scm_type: manual
+        local_path: "{{ awx_project_local_path }}"
+        wait: true
+        state: present
+      when: awx_project_scm_type == 'manual'
+
+    # ---- Shared: Inventory ----
+    - name: Create/update the localhost-only Inventory
+      awx.awx.inventory:
+        name: "{{ awx_inventory_name }}"
+        organization: "{{ awx_organization }}"
+        state: present
+
+    - name: Create/update the localhost host in that Inventory
+      awx.awx.host:
+        name: "localhost"
+        inventory: "{{ awx_inventory_name }}"
+        variables:
+          ansible_connection: local
+        state: present
+
+    # ---- Job Templates ----
+    - name: Create/update "PowerScale - Validate Input"
+      awx.awx.job_template:
+        name: "PowerScale - Validate Input"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/validate_input.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share (Dry Run)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (Dry Run)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          share_dry_run: true
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share filter (optional)"
+              question_description: >-
+                Limit this run to one share by name (must match a name in
+                shares.yml). Leave blank to run against every share.
+              variable: "share_filter"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share filter (optional)"
+              question_description: >-
+                Limit this run to one share by name (must match a name in
+                shares.yml). Leave blank to run against every share. Strongly
+                recommended for the FIRST real run against a new share.
+              variable: "share_filter"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
