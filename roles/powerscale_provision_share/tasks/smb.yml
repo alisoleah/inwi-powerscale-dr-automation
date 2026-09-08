@@ -31,6 +31,18 @@
 # and be treated as a literal string instead of being stripped. Constructing
 # two distinct dict shapes here (one with user_name, one with group_name)
 # avoids the sentinel ever being needed.
+#
+# CONFIRMED BUG (fixed here): this task is reached once per share, via
+# provision_share.yml's `include_role` loop over shares.yml. `set_fact`
+# facts persist for the rest of the WHOLE PLAY, not just this task's
+# include - so without an explicit reset, share 2 would start its
+# accumulation from share 1's leftover list instead of an empty one,
+# silently granting share 2 share 1's permission entries too. Reproduced
+# and confirmed with a standalone two-share test before fixing.
+- name: "[{{ share.name }}] Reset SMB permissions accumulator for this share"
+  ansible.builtin.set_fact:
+    _smb_permissions: []
+
 - name: "[{{ share.name }}] Build SMB permissions list"
   ansible.builtin.set_fact:
     _smb_permissions: "{{ (_smb_permissions | default([])) + [ (

@@ -9,12 +9,14 @@ see the header comment in that file for the full detail:
 2. Access zone parity between the two clusters
 3. Real `network_pool` / `network_subnet` values (currently `CHANGE_ME` in `sites.yml`)
 4. Target reachability from AWX's control plane for the *other* API calls this
-   repo makes directly against the target cluster (later phases) — unrelated
-   to authenticating the `synciqpolicy` call itself, see point 5
-5. Whether a SyncIQ certificate exchange (`target_certificate_id` /
-   `target_certificate_name`) is needed — **note:** `synciqpolicy`'s
-   `target_cluster` has no username/password field at all, so this isn't a
-   credential question, it's whether a cert-trust step needs to run first
+   repo makes directly against the target cluster (later phases)
+5. Whether `synciqpolicy` needs a certificate exchange
+   (`target_certificate_id`/`target_certificate_name`) or a
+   `target_cluster.password` field — **genuinely unresolved**: two full-page
+   fetches of the current upstream docs show no password field, a second
+   review disputed that citing source lines that couldn't be independently
+   verified. Settle it directly on a box with the real collection installed:
+   `ansible-doc dellemc.powerscale.synciqpolicy | grep -A5 target_cluster`
 
 ## Required variables (set by the caller)
 
@@ -34,6 +36,10 @@ been corrected (verified against the current upstream module docs):
   (top-level params — `default(omit)` is safe to use here, unlike the nested
   `permissions` list in `powerscale_provision_share`'s `smb.yml`, where the
   same pattern is NOT reliable)
+
+Whether `target_cluster.password` exists is unresolved (see open question 5
+above) — the commented-out task has a ready-to-uncomment line for it, gated
+on checking `ansible-doc` directly rather than guessing either way.
 
 ## To finish this role
 

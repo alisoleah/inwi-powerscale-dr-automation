@@ -15,30 +15,38 @@
     fail_msg: "sites.yml must define a non-empty 'sites' dictionary. See group_vars/all/sites.yml."
     success_msg: "sites dictionary present ({{ sites | default({}) | length }} site(s))."
 
-- name: Validate each site has required connection fields, and none are still CHANGE_ME
+- name: Validate each site has required connection fields, and none are still CHANGE_ME or empty
   ansible.builtin.assert:
     that:
-      - item.value.onefs_host is defined
-      - item.value.onefs_host | length > 0
-      - item.value.onefs_host != "CHANGE_ME"
-      - item.value.api_user is defined
-      - item.value.api_user | length > 0
-      - item.value.api_user != "CHANGE_ME"
-      - item.value.api_password is defined
-      - item.value.api_password | length > 0
-      - item.value.api_password != "CHANGE_ME"
-      - item.value.network_pool is defined
-      - item.value.network_pool != "CHANGE_ME"
-      - item.value.network_subnet is defined
-      - item.value.network_subnet != "CHANGE_ME"
+      - sites[item].onefs_host is defined
+      - sites[item].onefs_host | length > 0
+      - sites[item].onefs_host != "CHANGE_ME"
+      - sites[item].api_user is defined
+      - sites[item].api_user | length > 0
+      - sites[item].api_user != "CHANGE_ME"
+      - sites[item].api_password is defined
+      - sites[item].api_password | length > 0
+      - sites[item].api_password != "CHANGE_ME"
+      - sites[item].network_pool is defined
+      - sites[item].network_pool | length > 0
+      - sites[item].network_pool != "CHANGE_ME"
+      - sites[item].network_subnet is defined
+      - sites[item].network_subnet | length > 0
+      - sites[item].network_subnet != "CHANGE_ME"
     fail_msg: >-
-      Site '{{ item.key }}' is missing a required field (onefs_host, api_user,
-      api_password, network_pool, network_subnet) or still has a CHANGE_ME
-      placeholder value - edit group_vars/all/sites.yml before running against
-      a real cluster.
-  loop: "{{ sites | dict2items }}"
+      Site '{{ item }}' is missing a required field (onefs_host, api_user,
+      api_password, network_pool, network_subnet), one is empty, or one still
+      has a CHANGE_ME placeholder value - edit group_vars/all/sites.yml (or
+      check the attached AWX Credential's optional fields aren't blank)
+      before running against a real cluster.
+  # Looping over just the site NAMES (not `sites | dict2items`, which would
+  # put the whole value dict - including api_password - into `item`) means
+  # a failed assertion's dumped loop context never contains the actual
+  # password value, without needing a blanket no_log: true that would also
+  # hide the fail_msg above.
+  loop: "{{ sites.keys() | list }}"
   loop_control:
-    label: "{{ item.key }}"
+    label: "{{ item }}"
 
 - name: Fail fast if shares is not defined or empty
   ansible.builtin.assert:

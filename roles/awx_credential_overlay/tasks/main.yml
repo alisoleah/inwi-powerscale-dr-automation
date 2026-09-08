@@ -21,6 +21,19 @@
 # AWX surfaces as validate_input's normal CHANGE_ME failure instead of a
 # confusing partial-merge state.
 #
+# network_pool/network_subnet are NOT required in the Credential Type, so
+# AWX injects them as an empty string ('') rather than omitting them
+# entirely when left blank in the Credential form. Jinja's default() filter
+# only replaces UNDEFINED values by default - it does NOT treat '' as
+# needing a default - so plain `| default(sites.site_a.network_pool)` would
+# silently let an empty string through instead of falling back to whatever
+# sites.yml has. Passing `true` as the second arg makes default() also
+# treat falsy values (including '') as needing the fallback - see
+# https://docs.ansible.com/ansible/latest/collections/ansible/builtin/vars_filter.html
+# ("default" section) for this exact behavior. validate_input additionally
+# checks these fields for non-empty length, not just != CHANGE_ME, as a
+# second line of defense against the same class of gap.
+#
 # Hardcodes site_a/site_b since that matches this project's explicit 2-site
 # scope throughout (see INWI-DR-Automation-Plan.md). If INWI ever needs a
 # 3rd site, add a matching block below plus a matching 3rd Credential Type -
@@ -34,8 +47,8 @@
           'onefs_host': site_a_onefs_host,
           'api_user': site_a_api_user,
           'api_password': site_a_api_password,
-          'network_pool': site_a_network_pool | default(sites.site_a.network_pool),
-          'network_subnet': site_a_network_subnet | default(sites.site_a.network_subnet),
+          'network_pool': site_a_network_pool | default(sites.site_a.network_pool, true),
+          'network_subnet': site_a_network_subnet | default(sites.site_a.network_subnet, true),
         }, recursive=True)
       }, recursive=True) }}"
   when:
@@ -44,6 +57,7 @@
     - site_a_onefs_host is defined
     - site_a_api_user is defined
     - site_a_api_password is defined
+  no_log: true
 
 - name: Overlay AWX-injected Site B credential onto sites.site_b, if present
   ansible.builtin.set_fact:
@@ -52,8 +66,8 @@
           'onefs_host': site_b_onefs_host,
           'api_user': site_b_api_user,
           'api_password': site_b_api_password,
-          'network_pool': site_b_network_pool | default(sites.site_b.network_pool),
-          'network_subnet': site_b_network_subnet | default(sites.site_b.network_subnet),
+          'network_pool': site_b_network_pool | default(sites.site_b.network_pool, true),
+          'network_subnet': site_b_network_subnet | default(sites.site_b.network_subnet, true),
         }, recursive=True)
       }, recursive=True) }}"
   when:
@@ -62,3 +76,4 @@
     - site_b_onefs_host is defined
     - site_b_api_user is defined
     - site_b_api_password is defined
+  no_log: true

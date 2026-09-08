@@ -27,24 +27,32 @@
 #   4. Target reachability for API calls THIS repo makes directly to the
 #      target cluster (info / synciqtargetreports in later phases) - can
 #      AWX's control plane reach site_b's onefs_host directly (same as
-#      site_a), or does it need a jump host or separate credential? NOTE:
-#      this is unrelated to authenticating the synciqpolicy call itself -
-#      see point 5, the synciqpolicy module has no target username/password
-#      parameter at all.
+#      site_a), or does it need a jump host or separate credential? See
+#      point 5 for whether synciqpolicy itself also needs a target
+#      credential - unresolved as of this writing.
 #
 #   5. Whether the policy needs target_certificate_id/target_certificate_name
 #      (TLS cert exchange between clusters, mutually exclusive with each
-#      other) or plain host-based auth is acceptable for this environment.
-#      CONFIRMED from the current module docs: synciqpolicy's target_cluster
-#      only accepts target_host, target_path, target_certificate_id,
-#      target_certificate_name - there is NO password/api_user field for the
-#      target side. So this question isn't "which credential" - it's simply
-#      whether a certificate exchange step needs to run before this task (to
-#      obtain a target_certificate_id/name) or whether OneFS's target-side
-#      trust is handled some other way in INWI's environment. Similar in
-#      spirit to the offline TLS handling already done for the private
-#      container registry earlier in this engagement, but a different
-#      mechanism (OneFS cluster cert trust, not container registry TLS).
+#      other), a target_cluster.password field, or plain trust is acceptable
+#      in this environment. UNRESOLVED - two rounds of checking the rendered
+#      upstream docs (github.com/dell/ansible-powerscale, main branch,
+#      full-page fetch both times) show target_cluster's fields as only
+#      target_host/target_path/target_certificate_id/target_certificate_name
+#      - no password. A second review disputed this, citing specific source
+#      lines in synciqpolicy.py and a "with target password" example that
+#      doesn't appear in the rendered docs I fetched. I could not fetch the
+#      raw .py source to settle it directly. The Terraform provider for
+#      PowerScale (a separate codebase, same underlying OneFS API) DOES have
+#      a top-level target password field, which may be what got cited
+#      instead of the Ansible module.
+#      DEFINITIVE ANSWER: run this on the box with the real 3.10.0 collection
+#      installed (pscale-dr-automation has it vendored already):
+#        ansible-doc dellemc.powerscale.synciqpolicy | grep -A5 target_cluster
+#      That reads directly from the installed module's own DOCUMENTATION
+#      string - no doc-generation lag, no version mismatch, no ambiguity.
+#      If it shows a password sub-option, uncomment the target_cluster.password
+#      line below and set it to target_site.api_password. If not, the
+#      cert-exchange question is the real remaining piece of #5.
 #
 # check_mode/diff: synciqpolicy DOES support check_mode/diff per the
 # dellemc.powerscale changelog ("Added check and diff mode support for
@@ -108,7 +116,11 @@
 #     target_cluster:
 #       target_host: "{{ target_site.onefs_host }}"
 #       target_path: "{{ share.path }}"
-#       # Only ONE of these two, if either - see open question 5 above.
+#       # Uncomment ONLY if `ansible-doc dellemc.powerscale.synciqpolicy`
+#       # confirms a target_cluster.password sub-option exists - see open
+#       # question 5 above, this is genuinely unresolved as written.
+#       # password: "{{ target_site.api_password }}"
+#       # Otherwise, only ONE of these two, if either:
 #       # target_certificate_id: "{{ target_site.synciq_certificate_id | default(omit) }}"
 #       # target_certificate_name: "{{ target_site.synciq_certificate_name | default(omit) }}"
 #     accelerated_failback: "{{ synciq_default_accelerated_failback }}"
