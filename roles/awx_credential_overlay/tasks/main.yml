@@ -1,0 +1,64 @@
+---
+# Overlays AWX-injected per-site credentials onto the `sites` dict loaded
+# from group_vars/all/sites.yml, when present. Pairs with the two custom
+# AWX Credential Types defined in playbooks/dr/credential_types_powerscale_sites.yml
+# ("PowerScale - Site A" / "PowerScale - Site B").
+#
+# This lets the exact same playbooks/roles run two ways with zero branching
+# in the calling playbooks themselves:
+#   - Local/dev: sites.yml supplies everything (CHANGE_ME still caught by
+#     validate_input as usual, since this role runs BEFORE validate_input)
+#   - Under AWX: the Job Template has the two custom Credentials attached,
+#     AWX injects site_a_onefs_host / site_a_api_user / site_a_api_password /
+#     site_a_network_pool / site_a_network_subnet (and the site_b_*
+#     equivalents) as extra_vars, and this role overlays those onto
+#     sites.site_a / sites.site_b - so validate_input always checks the
+#     FINAL effective values regardless of which path supplied them.
+#
+# Only overlays a site if ALL THREE required fields for it are present
+# (onefs_host/api_user/api_password) - a partially-set credential is left
+# alone rather than silently merged, so a misconfigured Credential Type in
+# AWX surfaces as validate_input's normal CHANGE_ME failure instead of a
+# confusing partial-merge state.
+#
+# Hardcodes site_a/site_b since that matches this project's explicit 2-site
+# scope throughout (see INWI-DR-Automation-Plan.md). If INWI ever needs a
+# 3rd site, add a matching block below plus a matching 3rd Credential Type -
+# this isn't written as a generic loop since AWX Credential Type field names
+# can't be templated dynamically per-site anyway.
+
+- name: Overlay AWX-injected Site A credential onto sites.site_a, if present
+  ansible.builtin.set_fact:
+    sites: "{{ sites | combine({
+        'site_a': sites.site_a | combine({
+          'onefs_host': site_a_onefs_host,
+          'api_user': site_a_api_user,
+          'api_password': site_a_api_password,
+          'network_pool': site_a_network_pool | default(sites.site_a.network_pool),
+          'network_subnet': site_a_network_subnet | default(sites.site_a.network_subnet),
+        }, recursive=True)
+      }, recursive=True) }}"
+  when:
+    - sites is defined
+    - sites.site_a is defined
+    - site_a_onefs_host is defined
+    - site_a_api_user is defined
+    - site_a_api_password is defined
+
+- name: Overlay AWX-injected Site B credential onto sites.site_b, if present
+  ansible.builtin.set_fact:
+    sites: "{{ sites | combine({
+        'site_b': sites.site_b | combine({
+          'onefs_host': site_b_onefs_host,
+          'api_user': site_b_api_user,
+          'api_password': site_b_api_password,
+          'network_pool': site_b_network_pool | default(sites.site_b.network_pool),
+          'network_subnet': site_b_network_subnet | default(sites.site_b.network_subnet),
+        }, recursive=True)
+      }, recursive=True) }}"
+  when:
+    - sites is defined
+    - sites.site_b is defined
+    - site_b_onefs_host is defined
+    - site_b_api_user is defined
+    - site_b_api_password is defined

@@ -57,13 +57,15 @@ for what to drop in once retrieved.
 │   └── shares.yml         # list of shares to provision + replicate
 ├── roles/
 │   ├── validate_input/                  # pure local validation, no cluster contact
+│   ├── awx_credential_overlay/          # merges AWX-injected site credentials, when present
 │   ├── powerscale_provision_share/      # Phase 1 — NFS/SMB/quota creation
 │   └── powerscale_provision_replication/ # Phase 2 — SKELETON, see role header
 ├── playbooks/
 │   ├── validate_input.yml               # run this alone to sanity-check input
 │   ├── provision_share.yml              # Phase 1 entrypoint
 │   ├── provision_replication.yml        # Phase 2 entrypoint (skeleton)
-│   └── dr/                              # placeholder for the existing 5-playbook package
+│   └── dr/                              # placeholder for the existing 5-playbook package,
+│       └── credential_types_powerscale_sites.yml  # provisions the 2 AWX Credential Types
 ├── inventory/hosts.yml                  # localhost only — modules talk to PowerScale via REST API
 └── requirements.yml                     # dellemc.powerscale >=3.10.0
 ```
@@ -113,7 +115,19 @@ support.
 ## Credentials
 
 `sites.yml` documents the expected shape with `CHANGE_ME` placeholders,
-including `api_password`. **Do not commit real credentials.** Use
-`ansible-vault` to encrypt the file, or (preferred, matching the AWX pattern
-already used elsewhere in this engagement) pass credentials via AWX
-Credentials + `extra_vars` / Survey instead of a committed file.
+including `api_password`. **Do not commit real credentials.**
+
+Two ways to supply real values, both fully implemented:
+
+1. **AWX Credential injection (recommended for production)** — two custom
+   AWX Credential Types ("PowerScale - Site A" / "PowerScale - Site B"),
+   provisioned once via `playbooks/dr/credential_types_powerscale_sites.yml`.
+   Attach one Credential of each type to a Job Template and AWX injects the
+   real values as `extra_vars`; `roles/awx_credential_overlay` merges them
+   onto `sites` before validation runs. `sites.yml` can keep its `CHANGE_ME`
+   placeholders permanently in this mode — real secrets never touch the
+   repo. See `roles/awx_credential_overlay/README.md` for the full design
+   and how to simulate it locally with `-e` flags before you have AWX set up.
+2. **ansible-vault** — encrypt `sites.yml` directly, store the vault
+   password as an AWX Credential of type "Vault". Simpler, less AWX-specific
+   plumbing, but the vault password itself becomes a secret to rotate/manage.

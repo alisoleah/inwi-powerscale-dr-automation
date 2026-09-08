@@ -34,3 +34,9 @@ the actual files aren't present in this environment/repo yet:
    `control_plane_ee_image` field. If `bootstrap_awx_inwi_dr.yml` re-applies
    the AWX CR, double check this alias workaround
    (`k3s ctr images tag ...`) is still in place afterward.
+6. `credential_types_powerscale_sites.yml` already lives in this directory
+   (provisions the "PowerScale - Site A" / "PowerScale - Site B" Credential
+   Types used by `roles/awx_credential_overlay`). It currently stands alone
+   since `bootstrap_awx_inwi_dr.yml` isn't available yet — once it is,
+   consider merging these two credential_type tasks into it instead of
+   running this file separately.

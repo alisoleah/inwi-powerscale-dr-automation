@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: awx_credential_overlay
+  author: INWI DR Automation
+  description: >-
+    Overlays AWX-injected site_a_*/site_b_* extra_vars onto the sites dict,
+    when present, so playbooks work identically for local testing (sites.yml)
+    and under AWX (Credential injection). See tasks/main.yml header.
+  min_ansible_version: "2.14"
+dependencies: []

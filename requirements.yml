@@ -2,3 +2,7 @@
 collections:
   - name: dellemc.powerscale
     version: ">=3.10.0"
+  - name: awx.awx
+    # Only needed to run playbooks/dr/credential_types_powerscale_sites.yml
+    # (one-time AWX Credential Type provisioning) - not required for the
+    # core provisioning/validation playbooks.

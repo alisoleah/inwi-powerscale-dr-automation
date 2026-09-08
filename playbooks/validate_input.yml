@@ -7,4 +7,5 @@
     - ../group_vars/all/sites.yml
     - ../group_vars/all/shares.yml
   roles:
+    - awx_credential_overlay
     - validate_input

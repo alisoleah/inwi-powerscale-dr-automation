@@ -12,6 +12,10 @@
     - ../group_vars/all/shares.yml
 
   pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
     - name: Validate input before touching any cluster
       ansible.builtin.import_role:
         name: validate_input
