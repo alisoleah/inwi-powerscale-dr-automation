@@ -17,6 +17,7 @@ loops over `shares.yml` and includes this role once per entry.
 | Variable | Default | Description |
 |---|---|---|
 | `share_dry_run` | `false` | When `true`, skips every state-changing task and prints a plan instead |
+| `protocol_filter` | unset (= `mixed`) | `nfs` \| `smb` \| `mixed`. Restricts what gets created THIS RUN even if the share declares more than one protocol in `shares.yml` — e.g. `protocol_filter=nfs` against a share with `protocol: [nfs, smb]` creates only the NFS export. Set via a global extra_var (AWX Survey or `-e`), not passed explicitly through `include_role` — see `tasks/main.yml` header. |
 
 ## Task flow
 

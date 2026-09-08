@@ -34,10 +34,40 @@ A review caught 4 real issues, since fixed (see git log for the commit):
   scope) and left `target_certificate_id`/`target_certificate_name`
   placeholders for open question 5
 
+A second review round caught 3 more (all reproduced and re-tested):
+`no_log` missing on the credential overlay's `set_fact` tasks, an
+empty-string AWX-injection edge case on optional site fields, and a real
+accumulator bug in `smb.yml` across multiple shares. See the third commit's
+message for details.
+
 One suggested fix (`target_cluster.password`) was **not** applied after
 checking the actual module docs — `synciqpolicy`'s `target_cluster` has no
 password field at all; see the role's `tasks/main.yml` header for what that
 means for open question 5.
+
+## AWX Job Templates
+
+`playbooks/dr/provision_awx_project_and_templates.yml` creates 6 Job
+Templates (plus the Project, Inventory, and — for GitLab-backed setups —
+the SCM Credential): see the two `INWI-DR-Deployment-Runbook-*.md` files
+for the full deployment sequence.
+
+| Template | Playbook | Notes |
+|---|---|---|
+| PowerScale - Validate Input | `validate_input.yml` | No cluster contact |
+| PowerScale - Provision Share (Dry Run) | `provision_share.yml` | `share_dry_run: true`, optional `share_filter` |
+| PowerScale - Provision Share | `provision_share.yml` | Optional `share_filter` |
+| PowerScale - Provision Share (NFS Only) | `provision_share.yml` | `protocol_filter: nfs`, required `share_filter` |
+| PowerScale - Provision Share (SMB Only) | `provision_share.yml` | `protocol_filter: smb`, required `share_filter` |
+| PowerScale - Provision Share (Mixed NFS+SMB) | `provision_share.yml` | `protocol_filter: mixed`, required `share_filter` |
+| PowerScale - Provision Replication (SyncIQ Config) | `provision_replication.yml` | Still Phase 2 skeleton — plans only, creates nothing real yet. `synciq_policy_name` survey field is genuinely wired in |
+
+The three protocol-specific templates and the SyncIQ Config template all
+have a `synciq_policy_name` survey field — **only the SyncIQ Config
+template's actually does anything with it today.** On the three share
+templates it's captured for the record only, since Phase 1 doesn't touch
+SyncIQ — said explicitly in each survey question's description so it's not
+mistaken for working end-to-end before Phase 2 is unblocked.
 
 ## ⚠️ Missing: existing 5-playbook DR package
 

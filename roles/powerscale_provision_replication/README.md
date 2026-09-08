@@ -25,6 +25,7 @@ see the header comment in that file for the full detail:
 | `share` | One entry from `shares.yml` |
 | `site` | Resolved `sites.yml` entry for `share.primary_site` |
 | `target_site` | Resolved `sites.yml` entry for `share.replication.target_site` |
+| `synciq_policy_name` | **Optional.** Overrides the default `<share.name>_replication` naming convention. Already wired into the skeleton's planned output (and the commented-out real task) — this part isn't blocked by the 5 open questions above, unlike the actual `synciqpolicy` call itself. |
 
 ## Module param corrections already applied in the commented-out task
 

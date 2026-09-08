@@ -221,3 +221,173 @@
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
+
+    # ---- Protocol-specific share templates ----
+    # All three point at the SAME playbook (provision_share.yml) - what
+    # makes them behave differently is protocol_filter (see
+    # roles/powerscale_provision_share/tasks/main.yml), which restricts
+    # what gets created THIS RUN even if a share's shares.yml entry
+    # declares more than one protocol. share_filter is REQUIRED here
+    # (unlike the two generic templates above) since these are meant for
+    # one targeted share at a time, not a bulk run.
+    #
+    # synciq_policy_name is captured on all three but NOT YET CONSUMED by
+    # provision_share.yml - Phase 1 doesn't touch SyncIQ at all. It's
+    # collected here so operators get in the habit of naming the policy at
+    # request time, ready to hand to the "SyncIQ Config" template below
+    # once Phase 2 is unblocked. Said explicitly in the question text so
+    # this isn't mistaken for something that already works end-to-end.
+    - name: Create/update "PowerScale - Provision Share (NFS Only)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (NFS Only)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          protocol_filter: nfs
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Only the NFS export will be
+                created this run, even if the share also declares smb.
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
+                Captured here only so it's on record for when Phase 2
+                (the "SyncIQ Config" template) is unblocked. Leave blank to
+                use the default naming convention (<share name>_replication)
+                later.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share (SMB Only)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (SMB Only)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          protocol_filter: smb
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Only the SMB share will be
+                created this run, even if the share also declares nfs.
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
+                Captured here only so it's on record for when Phase 2
+                (the "SyncIQ Config" template) is unblocked. Leave blank to
+                use the default naming convention (<share name>_replication)
+                later.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share (Mixed NFS+SMB)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (Mixed NFS+SMB)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          protocol_filter: mixed
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Creates whatever the share
+                declares in shares.yml (expected: both nfs and smb - if the
+                share only declares one, only that one is created, same as
+                the generic template).
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
+                Captured here only so it's on record for when Phase 2
+                (the "SyncIQ Config" template) is unblocked. Leave blank to
+                use the default naming convention (<share name>_replication)
+                later.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    # ---- Phase 2: SyncIQ policy config ----
+    # Points at provision_replication.yml, still a SKELETON (see
+    # roles/powerscale_provision_replication/README.md) - launching this
+    # today prints a plan and creates nothing real. synciq_policy_name IS
+    # genuinely wired into the skeleton's naming logic (overrides the
+    # default <share name>_replication convention), unlike the three
+    # templates above where it's inert - see that role's tasks/main.yml.
+    - name: Create/update "PowerScale - Provision Replication (SyncIQ Config)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Replication (SyncIQ Config)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_replication.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Its replication.target_site
+                / schedule / rpo_alert_minutes fields drive the policy plan.
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                Overrides the default naming convention
+                (<share name>_replication). This DOES take effect in the
+                skeleton's planned output today, even though the real
+                synciqpolicy task itself stays commented out until the 5
+                open questions in the role are resolved.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present

@@ -8,6 +8,19 @@
 # passed for the whole shares.yml file (see playbooks/provision_share.yml
 # pre_tasks) - but it does not blindly trust that happened, in case it's
 # ever included directly from somewhere else.
+#
+# OPTIONAL: protocol_filter - a global extra_var (e.g. set by an AWX Job
+# Template's Survey, or -e protocol_filter=nfs), NOT passed explicitly by
+# provision_share.yml's include_role vars, so it flows through from the
+# top-level extra_vars scope untouched. One of: nfs | smb | mixed (default).
+# Lets "NFS Only" / "SMB Only" Job Templates restrict what actually gets
+# created THIS RUN even for a share whose shares.yml entry declares both
+# protocols - e.g. protocol_filter=nfs against a share with
+# protocol: [nfs, smb] creates only the NFS export, skips the SMB share
+# entirely for that run. Leaving it unset (or "mixed") preserves the
+# original behaviour: create whatever share.protocol declares, no
+# restriction - this is what the generic "Provision Share" / "Provision
+# Share (Dry Run)" Job Templates use.
 
 - name: Assert required role inputs are present
   ansible.builtin.assert:
@@ -23,13 +36,21 @@
       by the caller - see playbooks/provision_share.yml for the expected
       pattern (loop over shares.yml, site: sites[item.primary_site]).
 
+- name: Validate protocol_filter if set
+  ansible.builtin.assert:
+    that:
+      - protocol_filter in ['nfs', 'smb', 'mixed']
+    fail_msg: "protocol_filter must be one of: nfs, smb, mixed - got '{{ protocol_filter }}'"
+  when: protocol_filter is defined
+
 - name: "[{{ share.name }}] DRY RUN - report planned actions (no changes made)"
   ansible.builtin.debug:
     msg: >-
       Would ensure directory {{ share.path }} exists on {{ site.onefs_host }}
       {{ ('with a ' ~ share.quota_gb ~ 'GB quota') if share.quota_gb is defined else '(no quota requested)' }}.
-      {{ ('Would ensure NFS export for clients: ' ~ (share.nfs_clients | default([]) | join(', '))) if 'nfs' in share.protocol else 'No NFS export requested.' }}
-      {{ ("Would ensure SMB share '" ~ share.name ~ "' with " ~ (share.smb_permissions | default([]) | length | string) ~ " permission entrie(s).") if 'smb' in share.protocol else 'No SMB share requested.' }}
+      {{ ('Would ensure NFS export for clients: ' ~ (share.nfs_clients | default([]) | join(', '))) if ('nfs' in share.protocol and (protocol_filter | default('mixed')) in ['nfs', 'mixed']) else 'No NFS export this run.' }}
+      {{ ("Would ensure SMB share '" ~ share.name ~ "' with " ~ (share.smb_permissions | default([]) | length | string) ~ " permission entrie(s).") if ('smb' in share.protocol and (protocol_filter | default('mixed')) in ['smb', 'mixed']) else 'No SMB share this run.' }}
+      {{ ("protocol_filter=" ~ protocol_filter ~ " is restricting this run - see shares.yml for this share's full declared protocol list.") if protocol_filter is defined else '' }}
   when: share_dry_run | bool
 
 - name: "[{{ share.name }}] Ensure directory (and quota, if requested)"
@@ -41,9 +62,11 @@
   when:
     - not (share_dry_run | bool)
     - "'nfs' in share.protocol"
+    - (protocol_filter | default('mixed')) in ['nfs', 'mixed']
 
 - name: "[{{ share.name }}] Ensure SMB share"
   ansible.builtin.include_tasks: smb.yml
   when:
     - not (share_dry_run | bool)
     - "'smb' in share.protocol"
+    - (protocol_filter | default('mixed')) in ['smb', 'mixed']

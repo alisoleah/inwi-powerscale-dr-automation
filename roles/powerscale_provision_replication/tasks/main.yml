@@ -75,11 +75,22 @@
       and 'target_site' (resolved target sites.yml entry) vars - see
       playbooks/provision_replication.yml for the expected pattern.
 
+# synciq_policy_name is an OPTIONAL global extra_var (AWX Survey field on
+# the "PowerScale - Provision Replication (SyncIQ Config)" Job Template, or
+# -e synciq_policy_name=...). Overrides the default naming convention
+# below. This override is safe to use today - it's orthogonal to the 5
+# open questions blocking the actual synciqpolicy task, which is why it's
+# wired in even though that task stays commented out.
+- name: "[{{ share.name }}] Resolve effective SyncIQ policy name"
+  ansible.builtin.set_fact:
+    _synciq_policy_name: "{{ synciq_policy_name | default(share.name ~ '_replication') }}"
+
 - name: "[{{ share.name }}] SKELETON - report what a SyncIQ policy WOULD look like"
   ansible.builtin.debug:
     msg: >-
-      Would create SyncIQ policy '{{ share.name }}_replication' replicating
-      {{ share.path }} from {{ site.onefs_host }} (source, pool
+      Would create SyncIQ policy '{{ _synciq_policy_name }}'
+      {{ '(custom name)' if synciq_policy_name is defined else '(default naming convention - pass synciq_policy_name to override)' }}
+      replicating {{ share.path }} from {{ site.onefs_host }} (source, pool
       {{ site.network_pool }}) to {{ target_site.onefs_host }} (target),
       schedule '{{ share.replication.schedule }}'. NOT YET IMPLEMENTED -
       see this role's tasks/main.yml header for the 5 open questions
@@ -95,7 +106,7 @@
 #     verify_ssl: "{{ site.verify_ssl | default(false) }}"
 #     api_user: "{{ site.api_user }}"
 #     api_password: "{{ site.api_password }}"
-#     policy_name: "{{ share.name }}_replication"
+#     policy_name: "{{ _synciq_policy_name }}"
 #     action: "{{ synciq_default_action }}"
 #     enabled: true
 #     description: "Auto-provisioned replication for {{ share.name }}"
@@ -132,6 +143,6 @@
 # - name: "[{{ share.name }}] SyncIQ policy result"
 #   ansible.builtin.debug:
 #     msg: >-
-#       SyncIQ policy '{{ share.name }}_replication':
+#       SyncIQ policy '{{ _synciq_policy_name }}':
 #       {{ 'created/modified' if synciq_result.changed else 'already present, no change' }}
 #   when: not (replication_dry_run | bool)
