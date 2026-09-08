@@ -1,0 +1,40 @@
+---
+# check_mode: supported by this module as of recent dellemc.powerscale
+# versions (confirmed in current upstream docs at time of writing) - older
+# collection releases (e.g. 3.0.0 docs) documented it as NOT supported, so
+# verify against your installed 3.10.0 collection with:
+#   ansible-doc dellemc.powerscale.filesystem
+# before relying on native --check for this task specifically. share_dry_run
+# (see main.yml) works regardless of this either way.
+
+- name: "[{{ share.name }}] Build quota spec if quota_gb is set"
+  ansible.builtin.set_fact:
+    _fs_quota: >-
+      {{ {
+        'include_snap_data': false,
+        'include_data_protection_overhead': false,
+        'hard_limit_size': share.quota_gb,
+        'cap_unit': 'GB',
+        'container': true,
+        'quota_state': 'present'
+      } if share.quota_gb is defined else omit }}
+
+- name: "[{{ share.name }}] Create/ensure directory {{ share.path }}"
+  dellemc.powerscale.filesystem:
+    onefs_host: "{{ site.onefs_host }}"
+    port_no: "{{ site.port_no | default(8080) }}"
+    verify_ssl: "{{ site.verify_ssl | default(false) }}"
+    api_user: "{{ site.api_user }}"
+    api_password: "{{ site.api_password }}"
+    path: "{{ share.path }}"
+    access_zone: "{{ share.access_zone | default('System') }}"
+    recursive: true
+    quota: "{{ _fs_quota | default(omit) }}"
+    state: present
+  register: fs_result
+
+- name: "[{{ share.name }}] Directory result"
+  ansible.builtin.debug:
+    msg: >-
+      {{ share.path }}:
+      {{ 'created/modified' if fs_result.changed else 'already present, no change' }}

@@ -1,0 +1,34 @@
+---
+# One entry per PowerScale site/cluster. Keys ("site_a", "site_b") are
+# referenced by name from shares.yml's primary_site and
+# replication.target_site fields - rename them to match how INWI refers to
+# the sites if useful, just keep shares.yml in sync.
+#
+# SECURITY: do not commit real api_password values. Encrypt this file with
+# ansible-vault, or (preferred, matches the AWX pattern already used
+# elsewhere in this engagement) supply credentials via AWX Credentials +
+# extra_vars/Survey instead of a committed file. The CHANGE_ME values below
+# exist only to document the expected shape and will fail validation until
+# replaced.
+#
+# network_pool / network_subnet are for SyncIQ replication traffic
+# (Phase 2) - real values are one of the "two-site unknowns" still pending
+# from INWI, see INWI-DR-Automation-Plan.md.
+sites:
+  site_a:
+    onefs_host: "CHANGE_ME"        # e.g. "10.10.1.10"
+    port_no: 8080
+    verify_ssl: false
+    api_user: "CHANGE_ME"
+    api_password: "CHANGE_ME"
+    network_pool: "CHANGE_ME"      # e.g. "pool0" - PENDING INWI
+    network_subnet: "CHANGE_ME"    # e.g. "subnet0" - PENDING INWI
+
+  site_b:
+    onefs_host: "CHANGE_ME"
+    port_no: 8080
+    verify_ssl: false
+    api_user: "CHANGE_ME"
+    api_password: "CHANGE_ME"
+    network_pool: "CHANGE_ME"      # PENDING INWI
+    network_subnet: "CHANGE_ME"    # PENDING INWI

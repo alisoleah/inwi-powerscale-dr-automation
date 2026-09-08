@@ -1,0 +1,49 @@
+---
+# Operates on ONE share at a time. Expects 'share' (one entry from
+# shares.yml) and 'site' (the resolved sites.yml entry for
+# share.primary_site) to be set by the calling playbook - see
+# playbooks/provision_share.yml.
+#
+# This role should normally only run after roles/validate_input has already
+# passed for the whole shares.yml file (see playbooks/provision_share.yml
+# pre_tasks) - but it does not blindly trust that happened, in case it's
+# ever included directly from somewhere else.
+
+- name: Assert required role inputs are present
+  ansible.builtin.assert:
+    that:
+      - share is defined
+      - share.name is defined
+      - share.path is defined
+      - share.protocol is defined
+      - site is defined
+      - site.onefs_host is defined
+    fail_msg: >-
+      powerscale_provision_share requires 'share' and 'site' vars to be set
+      by the caller - see playbooks/provision_share.yml for the expected
+      pattern (loop over shares.yml, site: sites[item.primary_site]).
+
+- name: "[{{ share.name }}] DRY RUN - report planned actions (no changes made)"
+  ansible.builtin.debug:
+    msg: >-
+      Would ensure directory {{ share.path }} exists on {{ site.onefs_host }}
+      {{ ('with a ' ~ share.quota_gb ~ 'GB quota') if share.quota_gb is defined else '(no quota requested)' }}.
+      {{ ('Would ensure NFS export for clients: ' ~ (share.nfs_clients | default([]) | join(', '))) if 'nfs' in share.protocol else 'No NFS export requested.' }}
+      {{ ("Would ensure SMB share '" ~ share.name ~ "' with " ~ (share.smb_permissions | default([]) | length | string) ~ " permission entrie(s).") if 'smb' in share.protocol else 'No SMB share requested.' }}
+  when: share_dry_run | bool
+
+- name: "[{{ share.name }}] Ensure directory (and quota, if requested)"
+  ansible.builtin.include_tasks: filesystem.yml
+  when: not (share_dry_run | bool)
+
+- name: "[{{ share.name }}] Ensure NFS export"
+  ansible.builtin.include_tasks: nfs.yml
+  when:
+    - not (share_dry_run | bool)
+    - "'nfs' in share.protocol"
+
+- name: "[{{ share.name }}] Ensure SMB share"
+  ansible.builtin.include_tasks: smb.yml
+  when:
+    - not (share_dry_run | bool)
+    - "'smb' in share.protocol"

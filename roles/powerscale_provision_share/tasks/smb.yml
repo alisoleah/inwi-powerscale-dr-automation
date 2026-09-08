@@ -1,0 +1,43 @@
+---
+# check_mode: CONFIRMED NOT SUPPORTED by this module (per upstream docs, note:
+# "The check_mode is not supported."). Ansible will automatically SKIP this
+# task under `ansible-playbook --check` - safe (nothing executes against the
+# cluster), but produces no meaningful diff. Use share_dry_run=true (see
+# main.yml) for a reliable plan instead of relying on --check for SMB.
+
+- name: "[{{ share.name }}] Create/ensure SMB share"
+  dellemc.powerscale.smb:
+    onefs_host: "{{ site.onefs_host }}"
+    port_no: "{{ site.port_no | default(8080) }}"
+    verify_ssl: "{{ site.verify_ssl | default(false) }}"
+    api_user: "{{ site.api_user }}"
+    api_password: "{{ site.api_password }}"
+    share_name: "{{ share.name }}"
+    path: "{{ share.path }}"
+    access_zone: "{{ share.access_zone | default('System') }}"
+    state: present
+  register: smb_result
+
+- name: "[{{ share.name }}] SMB share result"
+  ansible.builtin.debug:
+    msg: >-
+      SMB share '{{ share.name }}':
+      {{ 'created/modified' if smb_result.changed else 'already present, no change' }}
+
+- name: "[{{ share.name }}] Apply SMB permission entry"
+  dellemc.powerscale.smb:
+    onefs_host: "{{ site.onefs_host }}"
+    port_no: "{{ site.port_no | default(8080) }}"
+    verify_ssl: "{{ site.verify_ssl | default(false) }}"
+    api_user: "{{ site.api_user }}"
+    api_password: "{{ site.api_password }}"
+    share_name: "{{ share.name }}"
+    permissions:
+      - user_name: "{{ item.user | default(omit) }}"
+        group_name: "{{ item.group | default(omit) }}"
+        permission: "{{ item.permission }}"
+        permission_type: "allow"
+    state: present
+  loop: "{{ share.smb_permissions | default([]) }}"
+  loop_control:
+    label: "{{ item.user | default(item.group | default('(unknown)')) }}"

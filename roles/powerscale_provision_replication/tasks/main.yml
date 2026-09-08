@@ -1,0 +1,107 @@
+---
+# ============================================================================
+# SKELETON - Phase 2 (SyncIQ replication policy creation)
+# ============================================================================
+# This role is DELIBERATELY INCOMPLETE. The real dellemc.powerscale.synciqpolicy
+# task is written below but commented out, because the following MUST be
+# confirmed with INWI first (see INWI-DR-Automation-Plan.md, "Two-site
+# details to confirm with customer before building"):
+#
+#   1. Replication direction - is it always site_a -> site_b, or can it vary
+#      per share? shares.yml already models this per-share via
+#      replication.target_site, so this is probably fine as-is, but confirm
+#      no share will ever need bidirectional/variable replication logic
+#      beyond what a single target_site field can express.
+#
+#   2. Access zone parity - do both clusters share the same access zone
+#      names/structure, or does the target need separate zone mapping? If
+#      separate, target_cluster below will need a target access-zone field
+#      this role doesn't have yet.
+#
+#   3. Real network_pool / network_subnet values for SyncIQ traffic on each
+#      site - currently CHANGE_ME placeholders in group_vars/all/sites.yml.
+#      roles/validate_input already rejects CHANGE_ME, so this role will
+#      never even be reached with bad values - but the real values are
+#      still unknown.
+#
+#   4. Target reachability / auth - can AWX's control plane reach
+#      site_b's onefs_host directly (same as site_a), or does it need a
+#      jump host or separate credential? If a separate credential, the
+#      calling playbook's site/target_site resolution (see
+#      playbooks/provision_replication.yml) may need to pull from a
+#      different AWX Credential than site_a currently uses.
+#
+#   5. Whether the policy needs target_certificate_id (TLS cert exchange
+#      between clusters) or plain host-based auth is acceptable for this
+#      environment - affects whether a certificate-exchange step needs to
+#      run before this task, similar in spirit to the offline TLS handling
+#      already done for the private container registry earlier in this
+#      engagement.
+#
+# check_mode/diff: synciqpolicy DOES support check_mode/diff per the
+# dellemc.powerscale changelog ("Added check and diff mode support for
+# synciqpolicy module") - safe to test with --check once this is wired up,
+# in addition to replication_dry_run below.
+# ============================================================================
+
+- name: Assert required role inputs are present
+  ansible.builtin.assert:
+    that:
+      - share is defined
+      - share.replication is defined
+      - share.replication.target_site is defined
+      - site is defined
+      - site.onefs_host is defined
+      - target_site is defined
+      - target_site.onefs_host is defined
+    fail_msg: >-
+      powerscale_provision_replication requires 'share', 'site' (source),
+      and 'target_site' (resolved target sites.yml entry) vars - see
+      playbooks/provision_replication.yml for the expected pattern.
+
+- name: "[{{ share.name }}] SKELETON - report what a SyncIQ policy WOULD look like"
+  ansible.builtin.debug:
+    msg: >-
+      Would create SyncIQ policy '{{ share.name }}_replication' replicating
+      {{ share.path }} from {{ site.onefs_host }} (source, pool
+      {{ site.network_pool }}) to {{ target_site.onefs_host }} (target),
+      schedule '{{ share.replication.schedule }}'. NOT YET IMPLEMENTED -
+      see this role's tasks/main.yml header for the 5 open questions
+      blocking real implementation.
+
+# ---- Real task - uncomment and remove the debug task above once the 5
+# ---- open questions in the header are answered ----
+#
+# - name: "[{{ share.name }}] Create/ensure SyncIQ policy"
+#   dellemc.powerscale.synciqpolicy:
+#     onefs_host: "{{ site.onefs_host }}"
+#     port_no: "{{ site.port_no | default(8080) }}"
+#     verify_ssl: "{{ site.verify_ssl | default(false) }}"
+#     api_user: "{{ site.api_user }}"
+#     api_password: "{{ site.api_password }}"
+#     policy_name: "{{ share.name }}_replication"
+#     action: "{{ synciq_default_action }}"
+#     enabled: true
+#     description: "Auto-provisioned replication for {{ share.name }}"
+#     run_job: "on-schedule"
+#     schedule: "{{ share.replication.schedule }}"
+#     source_cluster:
+#       source_root_path: "{{ share.path }}"
+#     source_network:
+#       pool: "{{ site.network_pool }}"
+#       subnet: "{{ site.network_subnet }}"
+#     target_cluster:
+#       target_host: "{{ target_site.onefs_host }}"
+#       target_path: "{{ share.path }}"
+#     accelerated_failback: "{{ synciq_default_accelerated_failback }}"
+#     target_compare_initial_sync: "{{ synciq_default_target_compare_initial_sync }}"
+#     state: present
+#   register: synciq_result
+#   when: not (replication_dry_run | bool)
+#
+# - name: "[{{ share.name }}] SyncIQ policy result"
+#   ansible.builtin.debug:
+#     msg: >-
+#       SyncIQ policy '{{ share.name }}_replication':
+#       {{ 'created/modified' if synciq_result.changed else 'already present, no change' }}
+#   when: not (replication_dry_run | bool)

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: powerscale_provision_share
+  author: INWI DR Automation
+  description: >-
+    Provisions a single directory (with optional quota), NFS export, and/or
+    SMB share on a PowerScale cluster from a 'share' + 'site' variable pair.
+    Operates on ONE share per invocation - the calling playbook loops over
+    shares.yml and passes 'share' and 'site' each time.
+  min_ansible_version: "2.14"
+dependencies: []

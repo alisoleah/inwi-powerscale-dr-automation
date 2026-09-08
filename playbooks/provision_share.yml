@@ -1,0 +1,24 @@
+---
+- name: Provision NFS/SMB shares on PowerScale (Phase 1)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+    - ../group_vars/all/shares.yml
+
+  pre_tasks:
+    - name: Validate input before touching any cluster
+      ansible.builtin.import_role:
+        name: validate_input
+
+  tasks:
+    - name: Provision each share
+      ansible.builtin.include_role:
+        name: powerscale_provision_share
+      vars:
+        share: "{{ item }}"
+        site: "{{ sites[item.primary_site] }}"
+      loop: "{{ shares }}"
+      loop_control:
+        label: "{{ item.name }}"

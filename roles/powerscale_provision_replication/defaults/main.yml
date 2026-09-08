@@ -1,0 +1,9 @@
+---
+# Same dry-run pattern as powerscale_provision_share.
+replication_dry_run: false
+
+# PLACEHOLDER DEFAULTS - confirm with INWI before first real run. See
+# tasks/main.yml header for the full list of open questions.
+synciq_default_action: "sync"                       # or "copy" - CONFIRM
+synciq_default_accelerated_failback: false
+synciq_default_target_compare_initial_sync: true

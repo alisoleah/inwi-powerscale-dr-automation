@@ -1,0 +1,7 @@
+---
+# When true, no dellemc.powerscale module that changes state is called -
+# every task is skipped and a plan is printed via debug instead. This is
+# the reliable, module-agnostic dry-run path for this role - see the role
+# README for why native `ansible-playbook --check` alone isn't sufficient
+# (the smb module doesn't support check_mode at all).
+share_dry_run: false

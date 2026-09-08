@@ -1,0 +1,21 @@
+# Ansible
+*.retry
+.vault_pass
+.vault_pass.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+ansible_powerscale.log
+
+# Local collection cache (if vendored per-project rather than system-wide)
+collections/
+
+# Editors / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/

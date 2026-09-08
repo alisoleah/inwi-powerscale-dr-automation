@@ -1,0 +1,4 @@
+---
+collections:
+  - name: dellemc.powerscale
+    version: ">=3.10.0"

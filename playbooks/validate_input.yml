@@ -1,0 +1,10 @@
+---
+- name: Validate PowerScale DR automation input (no cluster contact)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+    - ../group_vars/all/shares.yml
+  roles:
+    - validate_input

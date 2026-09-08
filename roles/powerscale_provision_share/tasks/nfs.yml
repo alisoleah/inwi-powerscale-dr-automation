@@ -1,0 +1,32 @@
+---
+# check_mode/diff: supported per the dellemc.powerscale changelog ("Added
+# diff mode support for NFS module") - verify against your installed 3.10.0
+# docs with `ansible-doc dellemc.powerscale.nfs` before relying on it.
+#
+# KNOWN HISTORICAL GOTCHA (Dell community-confirmed): idempotency broke
+# specifically when path was "/" - repeated runs created duplicate exports.
+# Not applicable here since all paths are required to start with /ifs/ (see
+# roles/validate_input), but worth knowing if this ever misbehaves - re-run
+# with -e share_dry_run=false and check the target with the `info` module
+# (gather_subset: nfs_exports) if an export looks duplicated.
+
+- name: "[{{ share.name }}] Create/ensure NFS export {{ share.path }}"
+  dellemc.powerscale.nfs:
+    onefs_host: "{{ site.onefs_host }}"
+    port_no: "{{ site.port_no | default(8080) }}"
+    verify_ssl: "{{ site.verify_ssl | default(false) }}"
+    api_user: "{{ site.api_user }}"
+    api_password: "{{ site.api_password }}"
+    path: "{{ share.path }}"
+    access_zone: "{{ share.access_zone | default('System') }}"
+    clients: "{{ share.nfs_clients | default([]) }}"
+    read_only_clients: "{{ share.nfs_read_only_clients | default([]) }}"
+    client_state: "present-in-export"
+    state: present
+  register: nfs_result
+
+- name: "[{{ share.name }}] NFS export result"
+  ansible.builtin.debug:
+    msg: >-
+      NFS export {{ share.path }}:
+      {{ 'created/modified' if nfs_result.changed else 'already present, no change' }}
