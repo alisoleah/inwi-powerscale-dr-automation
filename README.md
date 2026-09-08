@@ -20,6 +20,25 @@ as a skeleton pending confirmation of two-site details from INWI.
 | 5 | Wire into existing failover playbooks | **Blocked — see below** |
 | 6 | AWX packaging (Job Templates / Survey) | Not started |
 
+## Corrections applied after code review
+
+A review caught 4 real issues, since fixed (see git log for the commit):
+- `smb` module only accepts `read`/`write`/`full` for permissions, not
+  `read_write`/`full_control` — schema, validation, and example fixed
+- `source_network` is nested under `source_cluster` in `synciqpolicy`, not a
+  top-level sibling — fixed in the Phase 2 skeleton's commented-out task
+- `default(omit)` inside the nested `smb_permissions` list wasn't reliable —
+  `smb.yml` now builds each permission entry's exact dict shape explicitly
+  instead
+- Wired in `rpo_alert`/`rpo_alert_unit` (unused previously despite being in
+  scope) and left `target_certificate_id`/`target_certificate_name`
+  placeholders for open question 5
+
+One suggested fix (`target_cluster.password`) was **not** applied after
+checking the actual module docs — `synciqpolicy`'s `target_cluster` has no
+password field at all; see the role's `tasks/main.yml` header for what that
+means for open question 5.
+
 ## ⚠️ Missing: existing 5-playbook DR package
 
 The 5 playbooks delivered in an earlier session (SyncIQ monitor, preflight,
@@ -62,7 +81,15 @@ ansible-playbook playbooks/provision_share.yml -e share_dry_run=true
 
 # 4. Real run, Site A only recommended for first test:
 ansible-playbook playbooks/provision_share.yml
+
+# 5. Run against ONE share only (e.g. the low-traffic test share you're
+#    trying first), instead of every share in shares.yml:
+ansible-playbook playbooks/provision_share.yml -e share_filter=finance_data
 ```
+
+`share_filter` works the same way on `playbooks/provision_replication.yml`.
+A `share_filter` value that doesn't match any share name in `shares.yml`
+fails fast with the list of known names, rather than silently doing nothing.
 
 ## check_mode / `--check` notes
 

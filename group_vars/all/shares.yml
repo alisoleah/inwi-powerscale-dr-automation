@@ -15,7 +15,8 @@
 #   nfs_read_only_clients         optional
 #   smb_permissions               required (non-empty) if "smb" in protocol
 #     - user OR group             one of the two required per entry
-#       permission                one of: read, read_write, full_control
+#       permission                one of: read, write, full (exact values the
+#                                  dellemc.powerscale.smb module accepts)
 #   replication.target_site       required, must be a key in sites.yml, != primary_site
 #   replication.schedule          required, non-empty string (SyncIQ schedule expression)
 #   replication.rpo_alert_minutes optional, positive integer if set
@@ -31,7 +32,7 @@ shares:
     nfs_read_only_clients: []
     smb_permissions:
       - user: "INWI\\finance_team"
-        permission: "read_write"
+        permission: "write"
     replication:
       target_site: "site_b"
       schedule: "every 4 hours"
@@ -43,7 +44,7 @@ shares:
   #   primary_site: "site_a"
   #   smb_permissions:
   #     - group: "INWI\\hr_team"
-  #       permission: "full_control"
+  #       permission: "full"
   #   replication:
   #     target_site: "site_b"
   #     schedule: "every 12 hours"

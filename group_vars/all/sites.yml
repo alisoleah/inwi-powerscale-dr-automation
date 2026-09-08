@@ -32,3 +32,8 @@ sites:
     api_password: "CHANGE_ME"
     network_pool: "CHANGE_ME"      # PENDING INWI
     network_subnet: "CHANGE_ME"    # PENDING INWI
+    # synciq_target_certificate_id: ""    # PENDING - see open question 5 in
+    # synciq_target_certificate_name: ""  # roles/powerscale_provision_replication.
+    # Mutually exclusive with each other. Only needed on whichever site is
+    # ever used as a replication TARGET - uncomment + fill in once INWI
+    # confirms whether SyncIQ cert-based trust is required in this environment.

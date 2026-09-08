@@ -24,19 +24,27 @@
 #      never even be reached with bad values - but the real values are
 #      still unknown.
 #
-#   4. Target reachability / auth - can AWX's control plane reach
-#      site_b's onefs_host directly (same as site_a), or does it need a
-#      jump host or separate credential? If a separate credential, the
-#      calling playbook's site/target_site resolution (see
-#      playbooks/provision_replication.yml) may need to pull from a
-#      different AWX Credential than site_a currently uses.
+#   4. Target reachability for API calls THIS repo makes directly to the
+#      target cluster (info / synciqtargetreports in later phases) - can
+#      AWX's control plane reach site_b's onefs_host directly (same as
+#      site_a), or does it need a jump host or separate credential? NOTE:
+#      this is unrelated to authenticating the synciqpolicy call itself -
+#      see point 5, the synciqpolicy module has no target username/password
+#      parameter at all.
 #
-#   5. Whether the policy needs target_certificate_id (TLS cert exchange
-#      between clusters) or plain host-based auth is acceptable for this
-#      environment - affects whether a certificate-exchange step needs to
-#      run before this task, similar in spirit to the offline TLS handling
-#      already done for the private container registry earlier in this
-#      engagement.
+#   5. Whether the policy needs target_certificate_id/target_certificate_name
+#      (TLS cert exchange between clusters, mutually exclusive with each
+#      other) or plain host-based auth is acceptable for this environment.
+#      CONFIRMED from the current module docs: synciqpolicy's target_cluster
+#      only accepts target_host, target_path, target_certificate_id,
+#      target_certificate_name - there is NO password/api_user field for the
+#      target side. So this question isn't "which credential" - it's simply
+#      whether a certificate exchange step needs to run before this task (to
+#      obtain a target_certificate_id/name) or whether OneFS's target-side
+#      trust is handled some other way in INWI's environment. Similar in
+#      spirit to the offline TLS handling already done for the private
+#      container registry earlier in this engagement, but a different
+#      mechanism (OneFS cluster cert trust, not container registry TLS).
 #
 # check_mode/diff: synciqpolicy DOES support check_mode/diff per the
 # dellemc.powerscale changelog ("Added check and diff mode support for
@@ -85,14 +93,24 @@
 #     description: "Auto-provisioned replication for {{ share.name }}"
 #     run_job: "on-schedule"
 #     schedule: "{{ share.replication.schedule }}"
+#     # rpo_alert is a top-level param (unlike smb_permissions' nested list),
+#     # so default(omit) here IS reliable - this is the correct place to use it.
+#     rpo_alert: "{{ share.replication.rpo_alert_minutes | default(omit) }}"
+#     rpo_alert_unit: "minutes"
 #     source_cluster:
 #       source_root_path: "{{ share.path }}"
-#     source_network:
-#       pool: "{{ site.network_pool }}"
-#       subnet: "{{ site.network_subnet }}"
+#       # source_network is nested UNDER source_cluster, not a sibling of it -
+#       # confirmed against the current module docs (earlier drafts of this
+#       # skeleton had this wrong, placing it as a top-level key).
+#       source_network:
+#         pool: "{{ site.network_pool }}"
+#         subnet: "{{ site.network_subnet }}"
 #     target_cluster:
 #       target_host: "{{ target_site.onefs_host }}"
 #       target_path: "{{ share.path }}"
+#       # Only ONE of these two, if either - see open question 5 above.
+#       # target_certificate_id: "{{ target_site.synciq_certificate_id | default(omit) }}"
+#       # target_certificate_name: "{{ target_site.synciq_certificate_name | default(omit) }}"
 #     accelerated_failback: "{{ synciq_default_accelerated_failback }}"
 #     target_compare_initial_sync: "{{ synciq_default_target_compare_initial_sync }}"
 #     state: present

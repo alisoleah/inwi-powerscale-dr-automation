@@ -115,10 +115,12 @@
     that:
       - (item.1.user is defined) or (item.1.group is defined)
       - item.1.permission is defined
-      - item.1.permission in ['read', 'read_write', 'full_control']
+      - item.1.permission in ['read', 'write', 'full']
     fail_msg: >-
       Share '{{ item.0.name }}': each smb_permissions entry needs a 'user' or
-      'group' key, and 'permission' must be one of read / read_write / full_control.
+      'group' key, and 'permission' must be one of read / write / full (the
+      exact values the dellemc.powerscale.smb module accepts - NOT
+      read_write / full_control).
   loop: "{{ shares | subelements('smb_permissions', skip_missing=True) }}"
   loop_control:
     label: "{{ item.0.name }}"

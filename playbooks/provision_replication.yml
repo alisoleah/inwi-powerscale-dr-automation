@@ -16,6 +16,16 @@
       ansible.builtin.import_role:
         name: validate_input
 
+    - name: If share_filter is set, confirm it matches a real share
+      ansible.builtin.assert:
+        that:
+          - share_filter in (shares | map(attribute='name') | list)
+        fail_msg: >-
+          share_filter='{{ share_filter }}' does not match any share name in
+          shares.yml - check for a typo. Known share names:
+          {{ shares | map(attribute='name') | list | join(', ') }}
+      when: share_filter is defined
+
   tasks:
     - name: Provision replication policy for each share
       ansible.builtin.include_role:
@@ -24,6 +34,6 @@
         share: "{{ item }}"
         site: "{{ sites[item.primary_site] }}"
         target_site: "{{ sites[item.replication.target_site] }}"
-      loop: "{{ shares }}"
+      loop: "{{ shares | selectattr('name', 'equalto', share_filter) | list if share_filter is defined else shares }}"
       loop_control:
         label: "{{ item.name }}"
