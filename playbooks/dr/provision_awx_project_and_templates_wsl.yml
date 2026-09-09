@@ -1,0 +1,389 @@
+---
+# WSL / local rehearsal variant of provision_awx_project_and_templates.yml.
+#
+# The INWI original assumes GitLab + awx.inwi.lan. This variant is identical
+# except: (1) the Git-backed project branch is generic to any provider
+# reachable over HTTPS with a PAT (GitHub included - scm_pat_token/
+# scm_pat_username/scm_credential_name instead of GitLab-only names), and
+# (2) the connection defaults point at a local AWX instead of awx.inwi.lan.
+# Keep the two files in sync for the Job Templates section (identical below)
+# - this file exists so the INWI-specific original stays untouched.
+#
+# Provisions the AWX Project (Git-backed, any provider, OR manual/local-path
+# - your choice, see awx_project_scm_type below), a minimal localhost
+# Inventory (PowerScale modules talk to clusters over REST API, not SSH - no
+# real managed hosts needed), and all Job Templates this repo ships.
+#
+# Run this ONCE per environment (idempotent - safe to re-run, matches on
+# name). Needs the awx.awx collection installed locally.
+#
+# AWX API auth: username + password. Pass via -e, environment variables, or
+# a controller_config_file - see the awx.awx collection's normal auth
+# options.
+#
+# LOCAL REHEARSAL NOTE: there is no "PowerScale EE" registered on a local
+# AWX - pass -e ee_name=<whatever EE actually exists there, e.g. "AWX EE
+# (latest)">. validate_input.yml has no collection dependency so it runs
+# fine on the default EE; the provisioning playbooks need dellemc.powerscale
+# in whichever EE you point at.
+
+- name: Provision AWX Project and Job Templates for PowerScale DR automation (local/WSL rehearsal)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - awx.awx
+
+  vars:
+    # ---- AWX connection (override via -e) ----
+    controller_host: "http://127.0.0.1:33229"
+    controller_username: "admin"
+    # controller_password: pass via -e, never commit it
+    controller_verify_ssl: false
+
+    # ---- Shared ----
+    # CHANGE ME: must already exist - this playbook does not create
+    # Organizations, only references one by name.
+    awx_organization: "Default"
+    awx_project_name: "inwi-powerscale-dr-automation"
+    ee_name: "PowerScale EE"
+    awx_inventory_name: "PowerScale DR - Localhost"
+
+    # ---- Project type: REQUIRED, no default on purpose - forces an
+    # ---- explicit choice each run rather than silently defaulting.
+    # awx_project_scm_type: "git"     # Git-backed, any provider - also set:
+    #   awx_project_scm_url: "https://github.com/<user>/inwi-powerscale-dr-automation.git"
+    #   awx_project_scm_branch: "main"
+    #   scm_pat_token: "<token>"          # pass via -e, never commit
+    #   scm_pat_username: "<your git username>"
+    #   scm_credential_name: "GitHub - Local Test (PAT)"
+    #
+    # awx_project_scm_type: "manual"  # local path - also set:
+    #   awx_project_local_path: "inwi-powerscale-dr-automation"  # matches the
+    #     directory name under the AWX Project base path
+
+    # ---- Credential attachment for the two provision_share templates.
+    # Leave false until the "PowerScale - Site A" / "PowerScale - Site B"
+    # Credentials actually exist - re-run this playbook with it set true
+    # afterward to attach them; safe/idempotent either way.
+    attach_site_credentials: false
+    site_a_credential_name: "PowerScale - Site A"
+    site_b_credential_name: "PowerScale - Site B"
+
+  tasks:
+    - name: Assert awx_project_scm_type was explicitly set
+      ansible.builtin.assert:
+        that:
+          - awx_project_scm_type is defined
+          - awx_project_scm_type in ['git', 'manual']
+        fail_msg: >-
+          Set -e awx_project_scm_type=git (Git-backed) or
+          -e awx_project_scm_type=manual (local path) - see this file's
+          header for the additional vars each mode needs.
+
+    # ---- Git-backed project (any provider) ----
+    - name: Assert Git source-control vars are set
+      ansible.builtin.assert:
+        that:
+          - awx_project_scm_url is defined
+          - scm_pat_token is defined
+        fail_msg: >-
+          scm_type=git needs awx_project_scm_url and scm_pat_token set
+          (-e or environment).
+      when: awx_project_scm_type == 'git'
+
+    - name: Create/update the Git Source Control credential (PAT over HTTPS)
+      awx.awx.credential:
+        name: "{{ scm_credential_name | default('Git Source Control (PAT)') }}"
+        organization: "{{ awx_organization }}"
+        credential_type: "Source Control"
+        inputs:
+          username: "{{ scm_pat_username | default('oauth2') }}"
+          password: "{{ scm_pat_token }}"
+        state: present
+      when: awx_project_scm_type == 'git'
+      no_log: true
+
+    - name: Create/update the Git-backed Project
+      awx.awx.project:
+        name: "{{ awx_project_name }}"
+        organization: "{{ awx_organization }}"
+        scm_type: git
+        scm_url: "{{ awx_project_scm_url }}"
+        scm_branch: "{{ awx_project_scm_branch | default('main') }}"
+        credential: "{{ scm_credential_name | default('Git Source Control (PAT)') }}"
+        scm_update_on_launch: true
+        scm_clean: true
+        wait: true
+        state: present
+      when: awx_project_scm_type == 'git'
+
+    # ---- Manual (local path) project ----
+    - name: Assert manual-mode var is set
+      ansible.builtin.assert:
+        that:
+          - awx_project_local_path is defined
+        fail_msg: >-
+          scm_type=manual needs awx_project_local_path set - the directory
+          name under the AWX Project base path you placed the repo into.
+      when: awx_project_scm_type == 'manual'
+
+    - name: Create/update the manual (local path) Project
+      awx.awx.project:
+        name: "{{ awx_project_name }}"
+        organization: "{{ awx_organization }}"
+        scm_type: manual
+        local_path: "{{ awx_project_local_path }}"
+        wait: true
+        state: present
+      when: awx_project_scm_type == 'manual'
+
+    # ---- Shared: Inventory ----
+    - name: Create/update the localhost-only Inventory
+      awx.awx.inventory:
+        name: "{{ awx_inventory_name }}"
+        organization: "{{ awx_organization }}"
+        state: present
+
+    - name: Create/update the localhost host in that Inventory
+      awx.awx.host:
+        name: "localhost"
+        inventory: "{{ awx_inventory_name }}"
+        variables:
+          ansible_connection: local
+        state: present
+
+    # ---- Job Templates ----
+    - name: Create/update "PowerScale - Validate Input"
+      awx.awx.job_template:
+        name: "PowerScale - Validate Input"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/validate_input.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share (Dry Run)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (Dry Run)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          share_dry_run: true
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share filter (optional)"
+              question_description: >-
+                Limit this run to one share by name (must match a name in
+                shares.yml). Leave blank to run against every share.
+              variable: "share_filter"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share filter (optional)"
+              question_description: >-
+                Limit this run to one share by name (must match a name in
+                shares.yml). Leave blank to run against every share. Strongly
+                recommended for the FIRST real run against a new share.
+              variable: "share_filter"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    # ---- Protocol-specific share templates ----
+    # All three point at the SAME playbook (provision_share.yml) - what
+    # makes them behave differently is protocol_filter (see
+    # roles/powerscale_provision_share/tasks/main.yml), which restricts
+    # what gets created THIS RUN even if a share's shares.yml entry
+    # declares more than one protocol. share_filter is REQUIRED here
+    # (unlike the two generic templates above) since these are meant for
+    # one targeted share at a time, not a bulk run.
+    #
+    # synciq_policy_name is captured on all three but NOT YET CONSUMED by
+    # provision_share.yml - Phase 1 doesn't touch SyncIQ at all. It's
+    # collected here so operators get in the habit of naming the policy at
+    # request time, ready to hand to the "SyncIQ Config" template below
+    # once Phase 2 is unblocked. Said explicitly in the question text so
+    # this isn't mistaken for something that already works end-to-end.
+    - name: Create/update "PowerScale - Provision Share (NFS Only)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (NFS Only)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          protocol_filter: nfs
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Only the NFS export will be
+                created this run, even if the share also declares smb.
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
+                Captured here only so it's on record for when Phase 2
+                (the "SyncIQ Config" template) is unblocked. Leave blank to
+                use the default naming convention (<share name>_replication)
+                later.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share (SMB Only)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (SMB Only)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          protocol_filter: smb
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Only the SMB share will be
+                created this run, even if the share also declares nfs.
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
+                Captured here only so it's on record for when Phase 2
+                (the "SyncIQ Config" template) is unblocked. Leave blank to
+                use the default naming convention (<share name>_replication)
+                later.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Provision Share (Mixed NFS+SMB)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Share (Mixed NFS+SMB)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_share.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          protocol_filter: mixed
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Creates whatever the share
+                declares in shares.yml (expected: both nfs and smb - if the
+                share only declares one, only that one is created, same as
+                the generic template).
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
+                Captured here only so it's on record for when Phase 2
+                (the "SyncIQ Config" template) is unblocked. Leave blank to
+                use the default naming convention (<share name>_replication)
+                later.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    # ---- Phase 2: SyncIQ policy config ----
+    # Points at provision_replication.yml, still a SKELETON (see
+    # roles/powerscale_provision_replication/README.md) - launching this
+    # today prints a plan and creates nothing real. synciq_policy_name IS
+    # genuinely wired into the skeleton's naming logic (overrides the
+    # default <share name>_replication convention), unlike the three
+    # templates above where it's inert - see that role's tasks/main.yml.
+    - name: Create/update "PowerScale - Provision Replication (SyncIQ Config)"
+      awx.awx.job_template:
+        name: "PowerScale - Provision Replication (SyncIQ Config)"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/provision_replication.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Share name"
+              question_description: >-
+                Must match a name in shares.yml. Its replication.target_site
+                / schedule / rpo_alert_minutes fields drive the policy plan.
+              variable: "share_filter"
+              type: "text"
+              required: true
+            - question_name: "SyncIQ policy name (optional)"
+              question_description: >-
+                Overrides the default naming convention
+                (<share name>_replication). This DOES take effect in the
+                skeleton's planned output today, even though the real
+                synciqpolicy task itself stays commented out until the 5
+                open questions in the role are resolved.
+              variable: "synciq_policy_name"
+              type: "text"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
