@@ -37,6 +37,20 @@
   collections:
     - awx.awx
 
+  # controller_host/username/password/verify_ssl below are just play vars -
+  # the awx.awx modules don't read those by name on their own, they need
+  # module_defaults (or explicit args per task, or CONTROLLER_* env vars).
+  # FOUND VIA A REAL RUN (local rehearsal, not INWI): without this block
+  # every awx.awx task below silently connects to https://127.0.0.1 instead
+  # of controller_host, and fails with a connection error that looks
+  # nothing like an auth problem. Wiring it here so the vars actually work.
+  module_defaults:
+    group/awx.awx.controller:
+      controller_host: "{{ controller_host }}"
+      controller_username: "{{ controller_username }}"
+      controller_password: "{{ controller_password }}"
+      validate_certs: "{{ controller_verify_ssl }}"
+
   vars:
     # ---- AWX connection (override via -e) ----
     controller_host: "https://awx.inwi.lan"
@@ -167,6 +181,15 @@
         inventory: "{{ awx_inventory_name }}"
         execution_environment: "{{ ee_name }}"
         job_type: run
+        # FOUND VIA A REAL RUN: without the two site Credentials attached
+        # here too, roles/awx_credential_overlay always skips (no
+        # site_a_onefs_host/etc extra_vars to overlay), so this template
+        # could only ever validate the committed sites.yml - never what a
+        # real AWX Credential-based deployment actually injects. Attaching
+        # the same credentials as the provisioning templates below fixes
+        # that; harmless when attach_site_credentials is still false.
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
 
     - name: Create/update "PowerScale - Provision Share (Dry Run)"
