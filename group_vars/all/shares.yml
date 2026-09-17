@@ -8,11 +8,14 @@
 #   name                          required, alphanumeric/underscore/hyphen only, unique
 #   path                          required, must start with /ifs/
 #   access_zone                   optional, defaults to "System"
-#   owner                         optional, defaults to "root" - the local (or
-#                                  ldap/ads/file, see owner_provider_type)
-#                                  account that should own the share's directory
-#   owner_provider_type           optional, defaults to "local" - one of:
-#                                  local, file, ldap, ads (matches the
+#   owner                         optional, defaults to "root" - the account
+#                                  that should own the share's directory
+#   owner_provider_type           optional, defaults to "file" (traditional
+#                                  UNIX accounts like root - NOT "local",
+#                                  which is only for accounts created
+#                                  directly in OneFS, e.g. via `isi auth
+#                                  users create`) - one of: local, file,
+#                                  ldap, ads (matches the
 #                                  dellemc.powerscale.filesystem module's
 #                                  owner.provider_type options)
 #   protocol                      required, non-empty list of "nfs" and/or "smb"

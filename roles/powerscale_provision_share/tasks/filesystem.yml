@@ -31,12 +31,21 @@
     recursive: true
     # owner is REQUIRED by this module when creating a Filesystem (found via
     # a real run - never actually created a real filesystem before this).
-    # Defaults to local root, same pattern as access_zone's default -
-    # override per-share via shares.yml's optional owner/owner_provider_type
-    # fields if a share needs different ownership.
+    # Defaults to root, same pattern as access_zone's default - override per-
+    # share via shares.yml's optional owner/owner_provider_type fields if a
+    # share needs different ownership.
+    #
+    # provider_type defaults to "file", NOT this module's own doc-listed
+    # default of "local" - verified against a real cluster
+    # (dellemc.powerscale.info gather_subset=users) that root's actual
+    # provider is "lsa-file-provider:System". OneFS's "local" provider is
+    # for accounts created directly in OneFS (e.g. via `isi auth users
+    # create`); traditional/system UNIX accounts like root live under
+    # "file" instead - using "local" here fails with "Failed to find user
+    # for 'USER:root': No such user" even though root obviously exists.
     owner:
       name: "{{ share.owner | default('root') }}"
-      provider_type: "{{ share.owner_provider_type | default('local') }}"
+      provider_type: "{{ share.owner_provider_type | default('file') }}"
     quota: "{{ _fs_quota | default(omit) }}"
     state: present
   register: fs_result
