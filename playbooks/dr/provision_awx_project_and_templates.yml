@@ -190,6 +190,24 @@
         # that; harmless when attach_site_credentials is still false.
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Target site"
+              question_description: >-
+                Restrict validation to one site's connection fields. 'all'
+                (default) requires every site in sites.yml to be fully
+                populated, same as before this field existed. Pick a
+                specific site to validate it alone, e.g. while the other
+                site's real values are still pending - see
+                roles/validate_input/README.md.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
         state: present
 
     - name: Create/update "PowerScale - Provision Share (Dry Run)"
@@ -208,6 +226,16 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Target site"
+              question_description: >-
+                Restrict this run to shares whose primary_site matches.
+                'all' (default) processes every eligible share, same as
+                before this field existed.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
             - question_name: "Share filter (optional)"
               question_description: >-
                 Limit this run to one share by name (must match a name in
@@ -233,6 +261,16 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Target site"
+              question_description: >-
+                Restrict this run to shares whose primary_site matches.
+                'all' (default) processes every eligible share, same as
+                before this field existed.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
             - question_name: "Share filter (optional)"
               question_description: >-
                 Limit this run to one share by name (must match a name in
@@ -276,6 +314,16 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Target site"
+              question_description: >-
+                Must match the share's primary_site. Kept as a safety check
+                even though share_filter below already pins one share -
+                'all' (default) skips this check.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
             - question_name: "Share name"
               question_description: >-
                 Must match a name in shares.yml. Only the NFS export will be
@@ -313,6 +361,16 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Target site"
+              question_description: >-
+                Must match the share's primary_site. Kept as a safety check
+                even though share_filter below already pins one share -
+                'all' (default) skips this check.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
             - question_name: "Share name"
               question_description: >-
                 Must match a name in shares.yml. Only the SMB share will be
@@ -350,6 +408,16 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Target site"
+              question_description: >-
+                Must match the share's primary_site. Kept as a safety check
+                even though share_filter below already pins one share -
+                'all' (default) skips this check.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
             - question_name: "Share name"
               question_description: >-
                 Must match a name in shares.yml. Creates whatever the share
@@ -394,6 +462,18 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Target site"
+              question_description: >-
+                Must match the share's primary_site (the replication
+                SOURCE - not replication.target_site, which is resolved
+                separately). Kept as a safety check even though share_filter
+                below already pins one share - 'all' (default) skips this
+                check.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "all\nsite_a\nsite_b"
+              default: "all"
+              required: false
             - question_name: "Share name"
               question_description: >-
                 Must match a name in shares.yml. Its replication.target_site

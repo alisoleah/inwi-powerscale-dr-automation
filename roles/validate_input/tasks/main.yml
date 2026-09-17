@@ -15,7 +15,29 @@
     fail_msg: "sites.yml must define a non-empty 'sites' dictionary. See group_vars/all/sites.yml."
     success_msg: "sites dictionary present ({{ sites | default({}) | length }} site(s))."
 
-- name: Validate each site has required connection fields, and none are still CHANGE_ME or empty
+# target_site is an OPTIONAL global extra_var (AWX Survey field, or
+# -e target_site=...) restricting a run to a single site instead of every
+# site in sites.yml - e.g. useful to validate/provision against site_a
+# while site_b still has CHANGE_ME placeholders pending from INWI. Computed
+# once here (not duplicated per-playbook) since every playbook that touches
+# sites.yml imports this role first - see this file's own header comment.
+- name: Resolve target_site (defaults to 'all')
+  ansible.builtin.set_fact:
+    target_site: "{{ target_site | default('all') }}"
+
+- name: Fail fast if target_site isn't a real site key (or 'all')
+  ansible.builtin.assert:
+    that:
+      - target_site in (['all'] + (sites.keys() | list))
+    fail_msg: >-
+      target_site '{{ target_site }}' not found in sites.yml - valid values:
+      all, {{ sites.keys() | join(', ') }}.
+
+- name: Resolve active_sites (all of sites.yml, or just target_site)
+  ansible.builtin.set_fact:
+    active_sites: "{{ sites if target_site == 'all' else { target_site: sites[target_site] } }}"
+
+- name: Validate each active site has required connection fields, and none are still CHANGE_ME or empty
   ansible.builtin.assert:
     that:
       - sites[item].onefs_host is defined
@@ -39,12 +61,14 @@
       has a CHANGE_ME placeholder value - edit group_vars/all/sites.yml (or
       check the attached AWX Credential's optional fields aren't blank)
       before running against a real cluster.
-  # Looping over just the site NAMES (not `sites | dict2items`, which would
-  # put the whole value dict - including api_password - into `item`) means
-  # a failed assertion's dumped loop context never contains the actual
-  # password value, without needing a blanket no_log: true that would also
-  # hide the fail_msg above.
-  loop: "{{ sites.keys() | list }}"
+  # Only validates active_sites (all sites, or just target_site if set) -
+  # a site excluded from this run via target_site is allowed to keep
+  # CHANGE_ME placeholders without blocking it. Looping over just the site
+  # NAMES (not `active_sites | dict2items`, which would put the whole value
+  # dict - including api_password - into `item`) means a failed assertion's
+  # dumped loop context never contains the actual password value, without
+  # needing a blanket no_log: true that would also hide the fail_msg above.
+  loop: "{{ active_sites.keys() | list }}"
   loop_control:
     label: "{{ item }}"
 

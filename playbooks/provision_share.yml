@@ -26,6 +26,30 @@
           {{ shares | map(attribute='name') | list | join(', ') }}
       when: share_filter is defined
 
+    - name: If share_filter is set, confirm its share's primary_site is active
+      ansible.builtin.assert:
+        that:
+          - (shares | selectattr('name', 'equalto', share_filter) | first).primary_site in active_sites
+        fail_msg: >-
+          share_filter='{{ share_filter }}' has primary_site
+          '{{ (shares | selectattr('name', 'equalto', share_filter) | first).primary_site }}',
+          which isn't active - target_site is currently
+          '{{ target_site }}'. Either drop target_site (or set it to the
+          matching site), or pick a share whose primary_site is active.
+      when: share_filter is defined and target_site != 'all'
+
+    # Filtered by active_sites (target_site, default 'all' - see
+    # roles/validate_input) first, then narrowed further to one share via
+    # share_filter if set. A share whose primary_site isn't active is
+    # silently skipped here (not an error) UNLESS share_filter explicitly
+    # named it, which the assert above already catches.
+    - name: Resolve active_shares (active_sites' shares, or just share_filter's)
+      ansible.builtin.set_fact:
+        active_shares: >-
+          {{ shares
+             | selectattr('primary_site', 'in', active_sites.keys() | list)
+             | list }}
+
   tasks:
     - name: Provision each share
       ansible.builtin.include_role:
@@ -33,6 +57,6 @@
       vars:
         share: "{{ item }}"
         site: "{{ sites[item.primary_site] }}"
-      loop: "{{ shares | selectattr('name', 'equalto', share_filter) | list if share_filter is defined else shares }}"
+      loop: "{{ active_shares | selectattr('name', 'equalto', share_filter) | list if share_filter is defined else active_shares }}"
       loop_control:
         label: "{{ item.name }}"
