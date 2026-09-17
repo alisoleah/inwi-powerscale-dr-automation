@@ -29,6 +29,14 @@
     path: "{{ share.path }}"
     access_zone: "{{ share.access_zone | default('System') }}"
     recursive: true
+    # owner is REQUIRED by this module when creating a Filesystem (found via
+    # a real run - never actually created a real filesystem before this).
+    # Defaults to local root, same pattern as access_zone's default -
+    # override per-share via shares.yml's optional owner/owner_provider_type
+    # fields if a share needs different ownership.
+    owner:
+      name: "{{ share.owner | default('root') }}"
+      provider_type: "{{ share.owner_provider_type | default('local') }}"
     quota: "{{ _fs_quota | default(omit) }}"
     state: present
   register: fs_result
