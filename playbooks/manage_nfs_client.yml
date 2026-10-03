@@ -1,0 +1,155 @@
+---
+# Add or remove a single NFS client from an EXISTING export's client list,
+# fully ad-hoc via extra_vars/Survey - no shares.yml or sites.yml edits
+# needed. Idempotent (module-native add/remove-in-export semantics), with
+# automatic rollback of the export's client lists if anything fails after
+# the change is made.
+#
+# Verified against the real installed dellemc.powerscale 3.10.0 collection
+# (ansible-doc dellemc.powerscale.nfs) before writing this - in particular:
+#   - client_state: present-in-export/absent-in-export is the module's own
+#     native incremental add/remove primitive (NOT a full-list replace),
+#     so this is naturally idempotent without us diffing lists ourselves.
+#   - the module's return value is NFS_export_details (capital NFS) - easy
+#     to get wrong, confirmed from the real docs rather than guessed.
+#
+# Required extra_vars:
+#   target_site   site_a | site_b - which PowerScale cluster to operate on
+#   export_path   e.g. "/ifs/data/finance" - must be an EXISTING NFS export
+#                 (this playbook edits an export's client list, it does not
+#                 create new exports - use provision_share.yml for that)
+#   client_ip     e.g. "10.20.0.5" or a CIDR
+#   state         present | absent
+# Optional:
+#   client_list   clients | read_only_clients | read_write_clients | root_clients
+#                 (default: clients)
+#   access_zone   (default: System)
+
+- name: Add/remove an NFS client on an existing export
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+
+  pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
+    - name: Assert required extra_vars are present and valid
+      ansible.builtin.assert:
+        that:
+          - target_site is defined
+          - target_site in sites
+          - export_path is defined
+          - export_path | length > 0
+          - client_ip is defined
+          - client_ip | length > 0
+          - state is defined
+          - state in ['present', 'absent']
+        fail_msg: >-
+          Required: target_site (one of {{ sites.keys() | join(', ') }}),
+          export_path, client_ip, state (present|absent).
+
+    - name: Resolve working variables
+      ansible.builtin.set_fact:
+        site: "{{ sites[target_site] }}"
+        client_list: "{{ client_list | default('clients') }}"
+        access_zone: "{{ access_zone | default('System') }}"
+
+    - name: Validate client_list value
+      ansible.builtin.assert:
+        that:
+          - client_list in ['clients', 'read_only_clients', 'read_write_clients', 'root_clients']
+        fail_msg: "client_list must be one of: clients, read_only_clients, read_write_clients, root_clients"
+
+    - name: Fail fast if the target site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - site.onefs_host is defined
+          - site.onefs_host | length > 0
+          - site.onefs_host != "CHANGE_ME"
+          - site.api_user is defined
+          - site.api_user | length > 0
+          - site.api_password is defined
+          - site.api_password | length > 0
+          - site.api_password != "CHANGE_ME"
+        fail_msg: >-
+          Site '{{ target_site }}' is missing required connection fields or
+          still has a CHANGE_ME placeholder - check sites.yml / the
+          attached AWX Credential.
+      no_log: true
+
+  tasks:
+    - name: Capture the export's current state (for rollback + existence check)
+      dellemc.powerscale.nfs:
+        onefs_host: "{{ site.onefs_host }}"
+        port_no: "{{ site.port_no | default(8080) }}"
+        verify_ssl: "{{ site.verify_ssl | default(false) }}"
+        api_user: "{{ site.api_user }}"
+        api_password: "{{ site.api_password }}"
+        path: "{{ export_path }}"
+        access_zone: "{{ access_zone }}"
+        state: "present"
+      register: nfs_before
+      no_log: true
+
+    - name: "[{{ export_path }}] Current client lists (before)"
+      ansible.builtin.debug:
+        msg:
+          clients: "{{ nfs_before.NFS_export_details.clients | default([]) }}"
+          read_only_clients: "{{ nfs_before.NFS_export_details.read_only_clients | default([]) }}"
+          read_write_clients: "{{ nfs_before.NFS_export_details.read_write_clients | default([]) }}"
+          root_clients: "{{ nfs_before.NFS_export_details.root_clients | default([]) }}"
+
+    - block:
+        - name: "[{{ export_path }}] {{ 'Add' if state == 'present' else 'Remove' }} {{ client_ip }} {{ 'to' if state == 'present' else 'from' }} {{ client_list }}"
+          dellemc.powerscale.nfs:
+            onefs_host: "{{ site.onefs_host }}"
+            port_no: "{{ site.port_no | default(8080) }}"
+            verify_ssl: "{{ site.verify_ssl | default(false) }}"
+            api_user: "{{ site.api_user }}"
+            api_password: "{{ site.api_password }}"
+            path: "{{ export_path }}"
+            access_zone: "{{ access_zone }}"
+            "{{ client_list }}": ["{{ client_ip }}"]
+            client_state: "{{ 'present-in-export' if state == 'present' else 'absent-in-export' }}"
+            state: "present"
+          register: nfs_change
+          no_log: true
+
+        - name: "[{{ export_path }}] Result"
+          ansible.builtin.debug:
+            msg: >-
+              {{ client_ip }} {{ 'added to' if state == 'present' else 'removed from' }}
+              {{ client_list }} on {{ export_path }} -
+              {{ 'changed' if nfs_change.changed else 'already in desired state, no change' }}.
+
+      rescue:
+        - name: "ROLLBACK [{{ export_path }}] - restore original client lists"
+          dellemc.powerscale.nfs:
+            onefs_host: "{{ site.onefs_host }}"
+            port_no: "{{ site.port_no | default(8080) }}"
+            verify_ssl: "{{ site.verify_ssl | default(false) }}"
+            api_user: "{{ site.api_user }}"
+            api_password: "{{ site.api_password }}"
+            path: "{{ export_path }}"
+            access_zone: "{{ access_zone }}"
+            clients: "{{ nfs_before.NFS_export_details.clients | default([]) }}"
+            read_only_clients: "{{ nfs_before.NFS_export_details.read_only_clients | default([]) }}"
+            read_write_clients: "{{ nfs_before.NFS_export_details.read_write_clients | default([]) }}"
+            root_clients: "{{ nfs_before.NFS_export_details.root_clients | default([]) }}"
+            state: "present"
+          register: rollback_result
+          ignore_errors: true
+          no_log: true
+
+        - name: Fail the play - report rollback outcome either way
+          ansible.builtin.fail:
+            msg: >-
+              The change to {{ export_path }} failed. Rollback
+              {{ 'succeeded - client lists restored to their original state.'
+                 if not rollback_result.failed
+                 else 'ALSO FAILED - manual verification/intervention needed on '
+                      ~ site.onefs_host ~ ' for ' ~ export_path ~ '.' }}

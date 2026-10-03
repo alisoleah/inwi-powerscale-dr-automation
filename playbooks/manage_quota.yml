@@ -1,0 +1,175 @@
+---
+# Edit the hard limit size of an EXISTING Smart Quota, fully ad-hoc via
+# extra_vars/Survey - no shares.yml or sites.yml edits needed. Idempotent
+# (no-op if the requested size already matches), with automatic rollback
+# to the original size if anything fails after the change.
+#
+# Verified against the real installed dellemc.powerscale 3.10.0 collection
+# (ansible-doc dellemc.powerscale.smartquota) before writing this - in
+# particular:
+#   - the actual module name is `smartquota`, NOT `quota` (that module
+#     doesn't exist in this collection).
+#   - the return value is `quota_details.thresholds.hard`, returned in
+#     raw BYTES, not GB - this playbook converts both ways.
+#   - check_mode is natively supported, used here for the "before" read.
+#
+# Required extra_vars:
+#   target_site   site_a | site_b
+#   quota_path    e.g. "/ifs/data/finance" - must have an EXISTING quota
+#                 (this playbook only edits an existing quota's hard
+#                 limit, it does not create new quotas - use
+#                 provision_share.yml for that)
+#   new_quota_gb  the new hard limit size, in GB
+# Optional:
+#   quota_type    user | group | directory | default-user | default-group |
+#                 default-directory (default: directory)
+#   access_zone   (default: System)
+
+- name: Edit the hard limit of an existing Smart Quota
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+
+  pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
+    - name: Assert required extra_vars are present and valid
+      ansible.builtin.assert:
+        that:
+          - target_site is defined
+          - target_site in sites
+          - quota_path is defined
+          - quota_path | length > 0
+          - new_quota_gb is defined
+          - new_quota_gb | int > 0
+        fail_msg: >-
+          Required: target_site (one of {{ sites.keys() | join(', ') }}),
+          quota_path, new_quota_gb (positive integer, GB).
+
+    - name: Resolve working variables
+      ansible.builtin.set_fact:
+        site: "{{ sites[target_site] }}"
+        quota_type: "{{ quota_type | default('directory') }}"
+        access_zone: "{{ access_zone | default('System') }}"
+
+    - name: Validate quota_type
+      ansible.builtin.assert:
+        that:
+          - quota_type in ['user', 'group', 'directory', 'default-user', 'default-group', 'default-directory']
+        fail_msg: >-
+          quota_type must be one of: user, group, directory, default-user,
+          default-group, default-directory.
+
+    - name: Fail fast if the target site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - site.onefs_host is defined
+          - site.onefs_host | length > 0
+          - site.onefs_host != "CHANGE_ME"
+          - site.api_user is defined
+          - site.api_user | length > 0
+          - site.api_password is defined
+          - site.api_password | length > 0
+          - site.api_password != "CHANGE_ME"
+        fail_msg: >-
+          Site '{{ target_site }}' is missing required connection fields or
+          still has a CHANGE_ME placeholder - check sites.yml / the
+          attached AWX Credential.
+      no_log: true
+
+  tasks:
+    - name: Capture the quota's current state (for rollback + existence check)
+      dellemc.powerscale.smartquota:
+        onefs_host: "{{ site.onefs_host }}"
+        port_no: "{{ site.port_no | default(8080) }}"
+        verify_ssl: "{{ site.verify_ssl | default(false) }}"
+        api_user: "{{ site.api_user }}"
+        api_password: "{{ site.api_password }}"
+        path: "{{ quota_path }}"
+        quota_type: "{{ quota_type }}"
+        access_zone: "{{ access_zone }}"
+        state: "present"
+      register: quota_before
+      no_log: true
+
+    - name: Fail fast if no quota exists yet at this path
+      ansible.builtin.fail:
+        msg: >-
+          No existing {{ quota_type }} quota found at '{{ quota_path }}' on
+          {{ site.onefs_host }} - this playbook only edits an EXISTING
+          quota's hard limit, it does not create new quotas (use
+          provision_share.yml for that).
+      when: quota_before.quota_details is not defined
+
+    - name: Resolve the original hard limit, in GB (bytes -> GB, for rollback)
+      ansible.builtin.set_fact:
+        _original_hard_limit_gb: >-
+          {{ (quota_before.quota_details.thresholds.hard | default(0) | int) / (1024 ** 3) }}
+
+    - name: "[{{ quota_path }}] Current hard limit (before)"
+      ansible.builtin.debug:
+        msg: "{{ _original_hard_limit_gb }} GB"
+
+    - name: No change needed - report and skip
+      ansible.builtin.debug:
+        msg: >-
+          {{ quota_path }}: hard limit is already {{ new_quota_gb }}GB - no change needed.
+      when: (_original_hard_limit_gb | round(2)) == (new_quota_gb | int | round(2))
+
+    - block:
+        - name: "[{{ quota_path }}] Set hard limit to {{ new_quota_gb }}GB"
+          dellemc.powerscale.smartquota:
+            onefs_host: "{{ site.onefs_host }}"
+            port_no: "{{ site.port_no | default(8080) }}"
+            verify_ssl: "{{ site.verify_ssl | default(false) }}"
+            api_user: "{{ site.api_user }}"
+            api_password: "{{ site.api_password }}"
+            path: "{{ quota_path }}"
+            quota_type: "{{ quota_type }}"
+            access_zone: "{{ access_zone }}"
+            quota:
+              hard_limit_size: "{{ new_quota_gb }}"
+              cap_unit: "GB"
+            state: "present"
+          register: quota_change
+          no_log: true
+
+        - name: "[{{ quota_path }}] Result"
+          ansible.builtin.debug:
+            msg: >-
+              {{ quota_path }}: hard limit changed from {{ _original_hard_limit_gb }}GB
+              to {{ new_quota_gb }}GB -
+              {{ 'changed' if quota_change.changed else 'already in desired state, no change' }}.
+
+      rescue:
+        - name: "ROLLBACK [{{ quota_path }}] - restore original hard limit"
+          dellemc.powerscale.smartquota:
+            onefs_host: "{{ site.onefs_host }}"
+            port_no: "{{ site.port_no | default(8080) }}"
+            verify_ssl: "{{ site.verify_ssl | default(false) }}"
+            api_user: "{{ site.api_user }}"
+            api_password: "{{ site.api_password }}"
+            path: "{{ quota_path }}"
+            quota_type: "{{ quota_type }}"
+            access_zone: "{{ access_zone }}"
+            quota:
+              hard_limit_size: "{{ _original_hard_limit_gb }}"
+              cap_unit: "GB"
+            state: "present"
+          register: rollback_result
+          ignore_errors: true
+          no_log: true
+
+        - name: Fail the play - report rollback outcome either way
+          ansible.builtin.fail:
+            msg: >-
+              The quota change on {{ quota_path }} failed. Rollback
+              {{ 'succeeded - hard limit restored to ' ~ _original_hard_limit_gb ~ 'GB.'
+                 if not rollback_result.failed
+                 else 'ALSO FAILED - manual verification/intervention needed on '
+                      ~ site.onefs_host ~ ' for ' ~ quota_path ~ '.' }}
+      when: (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))

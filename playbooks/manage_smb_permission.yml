@@ -1,0 +1,221 @@
+---
+# Add or remove a single user/group/wellknown permission entry on an
+# EXISTING SMB share, fully ad-hoc via extra_vars/Survey - no shares.yml or
+# sites.yml edits needed. Idempotent, with automatic rollback of the
+# share's full permission list if anything fails after the change.
+#
+# Verified against the real installed dellemc.powerscale 3.10.0 collection
+# (ansible-doc dellemc.powerscale.smb) before writing this - in particular:
+#   - UNLIKE nfs's client_state, this module's `permissions` param is a
+#     FULL REPLACE of the share's entire permission list - there is no
+#     native per-entry add/remove primitive. This playbook therefore reads
+#     the current list, computes the new list itself (append or filter
+#     out), and submits the whole list - the diffing/idempotency logic is
+#     ours, not the module's.
+#   - the return value is `smb_details.shares[0].permissions`, each entry
+#     shaped as {permission, permission_type, trustee: {name, type, id}} -
+#     confirmed from the real docs rather than guessed. The INPUT shape
+#     differs (user_name/group_name/wellknown instead of a trustee dict),
+#     so this playbook converts between the two.
+#
+# Required extra_vars:
+#   target_site      site_a | site_b
+#   share_name       must be an EXISTING SMB share (this playbook edits
+#                    permissions, it does not create new shares - use
+#                    provision_share.yml for that)
+#   trustee_type     user | group | wellknown
+#   trustee_name     e.g. "INWI\\finance_team", or "everyone" for wellknown
+#   permission       read | write | full
+#   state            present | absent
+# Optional:
+#   permission_type  allow | deny (default: allow)
+#   provider_type    local | file | ads | ldap | nis (default: local) -
+#                    only used when adding a new entry
+#   access_zone      (default: System)
+
+- name: Add/remove an SMB permission entry on an existing share
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+
+  pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
+    - name: Assert required extra_vars are present and valid
+      ansible.builtin.assert:
+        that:
+          - target_site is defined
+          - target_site in sites
+          - share_name is defined
+          - share_name | length > 0
+          - trustee_type is defined
+          - trustee_type in ['user', 'group', 'wellknown']
+          - trustee_name is defined
+          - trustee_name | length > 0
+          - permission is defined
+          - permission in ['read', 'write', 'full']
+          - state is defined
+          - state in ['present', 'absent']
+        fail_msg: >-
+          Required: target_site (one of {{ sites.keys() | join(', ') }}),
+          share_name, trustee_type (user|group|wellknown), trustee_name,
+          permission (read|write|full), state (present|absent).
+
+    - name: Resolve working variables
+      ansible.builtin.set_fact:
+        site: "{{ sites[target_site] }}"
+        permission_type: "{{ permission_type | default('allow') }}"
+        provider_type: "{{ provider_type | default('local') }}"
+        access_zone: "{{ access_zone | default('System') }}"
+
+    - name: Validate permission_type
+      ansible.builtin.assert:
+        that:
+          - permission_type in ['allow', 'deny']
+        fail_msg: "permission_type must be one of: allow, deny"
+
+    - name: Fail fast if the target site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - site.onefs_host is defined
+          - site.onefs_host | length > 0
+          - site.onefs_host != "CHANGE_ME"
+          - site.api_user is defined
+          - site.api_user | length > 0
+          - site.api_password is defined
+          - site.api_password | length > 0
+          - site.api_password != "CHANGE_ME"
+        fail_msg: >-
+          Site '{{ target_site }}' is missing required connection fields or
+          still has a CHANGE_ME placeholder - check sites.yml / the
+          attached AWX Credential.
+      no_log: true
+
+  tasks:
+    - name: Capture the share's current permissions (for rollback + diffing)
+      dellemc.powerscale.smb:
+        onefs_host: "{{ site.onefs_host }}"
+        port_no: "{{ site.port_no | default(8080) }}"
+        verify_ssl: "{{ site.verify_ssl | default(false) }}"
+        api_user: "{{ site.api_user }}"
+        api_password: "{{ site.api_password }}"
+        share_name: "{{ share_name }}"
+        access_zone: "{{ access_zone }}"
+        state: "present"
+      register: smb_before
+      no_log: true
+
+    - name: Reset permissions accumulator (loops accumulate across runs otherwise - see smb.yml's known bug this project already fixed once)
+      ansible.builtin.set_fact:
+        _current_permissions: []
+
+    - name: Convert current permissions to module INPUT shape
+      ansible.builtin.set_fact:
+        _current_permissions: >-
+          {{ _current_permissions + [
+               ( {'user_name': perm_item.trustee.name} if perm_item.trustee.type == 'user'
+                 else {'group_name': perm_item.trustee.name} if perm_item.trustee.type == 'group'
+                 else {'wellknown': perm_item.trustee.name} )
+               | combine({'permission': perm_item.permission, 'permission_type': perm_item.permission_type})
+             ] }}
+      loop: "{{ smb_before.smb_details.shares[0].permissions | default([]) }}"
+      loop_control:
+        loop_var: perm_item
+        label: "{{ perm_item.trustee.name }}"
+
+    - name: "[{{ share_name }}] Current permissions (before)"
+      ansible.builtin.debug:
+        var: _current_permissions
+
+    - name: Check whether the target entry already exists as specified
+      ansible.builtin.set_fact:
+        _entry_already_present: >-
+          {{ smb_before.smb_details.shares[0].permissions
+             | default([])
+             | selectattr('trustee.name', 'equalto', trustee_name)
+             | selectattr('trustee.type', 'equalto', trustee_type)
+             | selectattr('permission', 'equalto', permission)
+             | selectattr('permission_type', 'equalto', permission_type)
+             | list | length > 0 }}
+
+    - name: Build desired permissions list (add)
+      ansible.builtin.set_fact:
+        _desired_permissions: >-
+          {{ _current_permissions + [
+               ( {'user_name': trustee_name} if trustee_type == 'user'
+                 else {'group_name': trustee_name} if trustee_type == 'group'
+                 else {'wellknown': trustee_name} )
+               | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type})
+             ] }}
+      when: state == 'present' and not _entry_already_present
+
+    # Rebuilt from the already-converted _current_permissions list, filtering
+    # out whichever key matches trustee_type (user_name/group_name/wellknown
+    # aren't a single consistent attribute name, so we select the right one
+    # by name rather than fighting Jinja's attribute filters on mixed-key dicts).
+    - name: Build desired permissions list (remove)
+      ansible.builtin.set_fact:
+        _desired_permissions: >-
+          {{ _current_permissions
+             | rejectattr(trustee_type ~ '_name', 'equalto', trustee_name)
+             | list }}
+      when: state == 'absent' and _entry_already_present
+
+    - name: No change needed - report and skip
+      ansible.builtin.debug:
+        msg: >-
+          {{ share_name }}: {{ trustee_name }} ({{ trustee_type }}, {{ permission }}/{{ permission_type }})
+          is already {{ 'present' if state == 'present' else 'absent' }} - no change needed.
+      when: (state == 'present' and _entry_already_present) or (state == 'absent' and not _entry_already_present)
+
+    - block:
+        - name: "[{{ share_name }}] Apply desired permissions list"
+          dellemc.powerscale.smb:
+            onefs_host: "{{ site.onefs_host }}"
+            port_no: "{{ site.port_no | default(8080) }}"
+            verify_ssl: "{{ site.verify_ssl | default(false) }}"
+            api_user: "{{ site.api_user }}"
+            api_password: "{{ site.api_password }}"
+            share_name: "{{ share_name }}"
+            access_zone: "{{ access_zone }}"
+            permissions: "{{ _desired_permissions }}"
+            state: "present"
+          register: smb_change
+          no_log: true
+
+        - name: "[{{ share_name }}] Result"
+          ansible.builtin.debug:
+            msg: >-
+              {{ trustee_name }} {{ 'added to' if state == 'present' else 'removed from' }}
+              {{ share_name }}'s permissions -
+              {{ 'changed' if smb_change.changed else 'already in desired state, no change' }}.
+
+      rescue:
+        - name: "ROLLBACK [{{ share_name }}] - restore original permission list"
+          dellemc.powerscale.smb:
+            onefs_host: "{{ site.onefs_host }}"
+            port_no: "{{ site.port_no | default(8080) }}"
+            verify_ssl: "{{ site.verify_ssl | default(false) }}"
+            api_user: "{{ site.api_user }}"
+            api_password: "{{ site.api_password }}"
+            share_name: "{{ share_name }}"
+            access_zone: "{{ access_zone }}"
+            permissions: "{{ _current_permissions }}"
+            state: "present"
+          register: rollback_result
+          ignore_errors: true
+          no_log: true
+
+        - name: Fail the play - report rollback outcome either way
+          ansible.builtin.fail:
+            msg: >-
+              The permission change on {{ share_name }} failed. Rollback
+              {{ 'succeeded - permissions restored to their original state.'
+                 if not rollback_result.failed
+                 else 'ALSO FAILED - manual verification/intervention needed on '
+                      ~ site.onefs_host ~ ' for ' ~ share_name ~ '.' }}
+      when: _desired_permissions is defined
