@@ -32,6 +32,34 @@
 #   provider_type    local | file | ads | ldap | nis (default: local) -
 #                    only used when adding a new entry
 #   access_zone      (default: System)
+#
+# Example - grant a domain group write access:
+#   ansible-playbook playbooks/manage_smb_permission.yml \
+#     -e target_site=site_a \
+#     -e share_name=finance_data \
+#     -e trustee_type=group \
+#     -e 'trustee_name="INWI\\finance_team"' \
+#     -e permission=write \
+#     -e state=present
+#
+# Example - revoke it again:
+#   ansible-playbook playbooks/manage_smb_permission.yml \
+#     -e target_site=site_a \
+#     -e share_name=finance_data \
+#     -e trustee_type=group \
+#     -e 'trustee_name="INWI\\finance_team"' \
+#     -e permission=write \
+#     -e state=absent
+#
+# Example - AWX Survey / extra_vars JSON (same operation as the first):
+#   {
+#     "target_site": "site_a",
+#     "share_name": "finance_data",
+#     "trustee_type": "group",
+#     "trustee_name": "INWI\\finance_team",
+#     "permission": "write",
+#     "state": "present"
+#   }
 
 - name: Add/remove an SMB permission entry on an existing share
   hosts: localhost

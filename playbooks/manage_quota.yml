@@ -24,6 +24,19 @@
 #   quota_type    user | group | directory | default-user | default-group |
 #                 default-directory (default: directory)
 #   access_zone   (default: System)
+#
+# Example - resize an existing directory quota to 10GB:
+#   ansible-playbook playbooks/manage_quota.yml \
+#     -e target_site=site_a \
+#     -e quota_path=/ifs/data/finance \
+#     -e new_quota_gb=10
+#
+# Example - AWX Survey / extra_vars JSON (same operation):
+#   {
+#     "target_site": "site_a",
+#     "quota_path": "/ifs/data/finance",
+#     "new_quota_gb": 10
+#   }
 
 - name: Edit the hard limit of an existing Smart Quota
   hosts: localhost

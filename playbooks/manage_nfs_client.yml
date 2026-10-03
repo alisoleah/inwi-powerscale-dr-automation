@@ -24,6 +24,28 @@
 #   client_list   clients | read_only_clients | read_write_clients | root_clients
 #                 (default: clients)
 #   access_zone   (default: System)
+#
+# Example - add a client:
+#   ansible-playbook playbooks/manage_nfs_client.yml \
+#     -e target_site=site_a \
+#     -e export_path=/ifs/data/finance \
+#     -e client_ip=10.20.0.5 \
+#     -e state=present
+#
+# Example - remove it again:
+#   ansible-playbook playbooks/manage_nfs_client.yml \
+#     -e target_site=site_a \
+#     -e export_path=/ifs/data/finance \
+#     -e client_ip=10.20.0.5 \
+#     -e state=absent
+#
+# Example - AWX Survey / extra_vars JSON (same operation as the first):
+#   {
+#     "target_site": "site_a",
+#     "export_path": "/ifs/data/finance",
+#     "client_ip": "10.20.0.5",
+#     "state": "present"
+#   }
 
 - name: Add/remove an NFS client on an existing export
   hosts: localhost
