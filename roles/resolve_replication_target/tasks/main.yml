@@ -1,0 +1,92 @@
+---
+# Looks up whether `source_path` is covered by a real SyncIQ policy on the
+# source cluster, and if so, resolves which sites.yml site the policy
+# replicates TO. Used by the ad-hoc manage_*.yml playbooks' optional
+# apply_to_target extra_var.
+#
+# Deliberately checks the REAL, currently-configured SyncIQ policy on the
+# cluster (not shares.yml's declared replication.target_site) - this repo's
+# Phase 2 (real synciqpolicy creation) is still a skeleton, so a share's
+# shares.yml entry may declare replication intent that was never actually
+# applied, or the reverse (a real policy someone configured by hand that
+# isn't reflected in shares.yml at all). The live cluster is the source of
+# truth for "is this actually being replicated right now".
+#
+# Requires, already set by the caller:
+#   site        the resolved source site dict (onefs_host/api_user/etc)
+#   sites       the full sites.yml dict (to match target_host back to a
+#               site key)
+#   source_path the export/share/quota path to check coverage for
+#
+# Sets:
+#   replication_found         bool
+#   replication_target_site   sites.yml key matching the policy's
+#                              target_host, if found and known to us
+#   replication_target_path   the policy's target_path, if found
+#
+# Never fails on its own if nothing is found or the target isn't one of
+# our known sites - by design, callers fall back to source-only and just
+# report why, rather than blocking the whole operation.
+#
+# KNOWN LIMITATION: if source_path is covered by more than one SyncIQ
+# policy (nested roots), this picks the FIRST match found, not necessarily
+# the most specific one. Point policies at exact, non-overlapping roots to
+# avoid ambiguity.
+
+- name: Reset replication discovery facts
+  ansible.builtin.set_fact:
+    replication_found: false
+    replication_target_site: ""
+    replication_target_path: ""
+    _matching_policies: []
+
+- name: List SyncIQ policies on the source cluster
+  dellemc.powerscale.info:
+    onefs_host: "{{ site.onefs_host }}"
+    port_no: "{{ site.port_no | default(8080) }}"
+    verify_ssl: "{{ site.verify_ssl | default(false) }}"
+    api_user: "{{ site.api_user }}"
+    api_password: "{{ site.api_password }}"
+    gather_subset:
+      - synciq_policies
+  register: synciq_list
+  no_log: true
+
+- name: Find policies whose source_root_path covers source_path
+  ansible.builtin.set_fact:
+    _matching_policies: "{{ _matching_policies + [policy_item] }}"
+  loop: "{{ synciq_list.SynciqPolicies | default([]) }}"
+  loop_control:
+    loop_var: policy_item
+    label: "{{ policy_item.name }}"
+  when: >-
+    policy_item.source_root_path is defined and
+    (source_path == policy_item.source_root_path
+     or source_path is match(policy_item.source_root_path | regex_escape ~ '/'))
+
+- name: Note whether a covering SyncIQ policy was found
+  ansible.builtin.set_fact:
+    replication_found: "{{ _matching_policies | length > 0 }}"
+
+- name: Get full policy details (needed for target_host, not in the summary list)
+  dellemc.powerscale.synciqpolicy:
+    onefs_host: "{{ site.onefs_host }}"
+    port_no: "{{ site.port_no | default(8080) }}"
+    verify_ssl: "{{ site.verify_ssl | default(false) }}"
+    api_user: "{{ site.api_user }}"
+    api_password: "{{ site.api_password }}"
+    policy_name: "{{ _matching_policies[0].name }}"
+    state: present
+  register: policy_details
+  no_log: true
+  when: replication_found
+
+- name: Resolve which sites.yml key matches the policy's target_host, if any
+  ansible.builtin.set_fact:
+    replication_target_site: >-
+      {{ (sites | dict2items
+          | selectattr('value.onefs_host', 'equalto', policy_details.synciq_policy_details.target_host)
+          | map(attribute='key') | list | first) | default('', true) }}
+    replication_target_path: "{{ policy_details.synciq_policy_details.target_path | default('') }}"
+  when: replication_found and policy_details.synciq_policy_details is defined
+  no_log: true

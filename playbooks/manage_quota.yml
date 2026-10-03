@@ -21,9 +21,21 @@
 #                 provision_share.yml for that)
 #   new_quota_gb  the new hard limit size, in GB
 # Optional:
-#   quota_type    user | group | directory | default-user | default-group |
-#                 default-directory (default: directory)
-#   access_zone   (default: System)
+#   quota_type       user | group | directory | default-user | default-group |
+#                    default-directory (default: directory)
+#   access_zone      (default: System)
+#   apply_to_target  true | false (default: false) - if true, checks
+#                    whether quota_path is covered by a REAL SyncIQ policy
+#                    on the source cluster (the live cluster is the source
+#                    of truth, not shares.yml's declared replication), and
+#                    if so, applies the same hard-limit resize to a
+#                    matching quota on the replication target too. SyncIQ
+#                    does not replicate quota configuration itself, so if
+#                    the target doesn't already have its own quota at that
+#                    path, this is reported and the run falls back to
+#                    source-only - it never creates one there as a side
+#                    effect. If the target-side change fails, BOTH source
+#                    and target are rolled back to avoid drift.
 #
 # Example - resize an existing directory quota to 10GB:
 #   ansible-playbook playbooks/manage_quota.yml \
@@ -96,6 +108,10 @@
 
   tasks:
     - name: Capture the quota's current state (for rollback + existence check)
+      # check_mode: true here is deliberate and load-bearing - this module
+      # explicitly documents check_mode support, and without it a plain
+      # state=present call on a path with NO existing quota could create
+      # one as a side effect of merely "checking".
       dellemc.powerscale.smartquota:
         onefs_host: "{{ site.onefs_host }}"
         port_no: "{{ site.port_no | default(8080) }}"
@@ -106,6 +122,7 @@
         quota_type: "{{ quota_type }}"
         access_zone: "{{ access_zone }}"
         state: "present"
+      check_mode: true
       register: quota_before
       no_log: true
 
@@ -133,8 +150,77 @@
           {{ quota_path }}: hard limit is already {{ new_quota_gb }}GB - no change needed.
       when: (_original_hard_limit_gb | round(2)) == (new_quota_gb | int | round(2))
 
+    - name: Resolve apply_to_target
+      ansible.builtin.set_fact:
+        apply_to_target: "{{ apply_to_target | default(false) | bool }}"
+      when: (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+
+    - name: Check for a real replication target, if requested
+      ansible.builtin.include_role:
+        name: resolve_replication_target
+      vars:
+        source_path: "{{ quota_path }}"
+      when: apply_to_target | default(false) and (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+
+    - name: Report replication discovery result
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'No SyncIQ policy covers ' ~ quota_path ~ ' on ' ~ site.onefs_host ~ ' - applying to source only.'
+             if not (replication_found | default(false))
+             else ('Replication target is ' ~ replication_target_site ~ ', but that site is not defined in sites.yml - applying to source only.'
+                   if (replication_target_site | default('')) == ''
+                   else 'Replication target resolved: ' ~ replication_target_site ~ ' (' ~ replication_target_path ~ ').') }}
+      when: apply_to_target | default(false) and (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+
+    - name: Check whether the target quota actually exists
+      when: >-
+        (apply_to_target | default(false)) and (replication_found | default(false))
+        and (replication_target_site | default('')) != ''
+        and (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+      block:
+        - name: Resolve target site connection details
+          ansible.builtin.set_fact:
+            target_site_obj: "{{ sites[replication_target_site] }}"
+
+        - name: Check whether the target quota exists (read-only)
+          dellemc.powerscale.smartquota:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            path: "{{ replication_target_path }}"
+            quota_type: "{{ quota_type }}"
+            access_zone: "{{ access_zone }}"
+            state: "present"
+          check_mode: true
+          register: quota_target_before
+          no_log: true
+
+        - name: Report if the target quota is missing
+          ansible.builtin.debug:
+            msg: >-
+              No {{ quota_type }} quota found at {{ replication_target_path }}
+              on {{ target_site_obj.onefs_host }} (the replication target) -
+              applying to source only.
+          when: quota_target_before.quota_details is not defined
+
+        - name: Resolve the target's original hard limit, in GB
+          ansible.builtin.set_fact:
+            _target_original_hard_limit_gb: >-
+              {{ (quota_target_before.quota_details.thresholds.hard | default(0) | int) / (1024 ** 3) }}
+          when: quota_target_before.quota_details is defined
+
+    - name: Resolve whether we'll actually touch the target this run
+      ansible.builtin.set_fact:
+        _apply_to_target_effective: >-
+          {{ (apply_to_target | default(false)) and (replication_found | default(false))
+             and (replication_target_site | default('')) != ''
+             and (quota_target_before is defined)
+             and (quota_target_before.quota_details is defined) }}
+
     - block:
-        - name: "[{{ quota_path }}] Set hard limit to {{ new_quota_gb }}GB"
+        - name: "[{{ quota_path }}] (source) Set hard limit to {{ new_quota_gb }}GB"
           dellemc.powerscale.smartquota:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
@@ -151,15 +237,41 @@
           register: quota_change
           no_log: true
 
-        - name: "[{{ quota_path }}] Result"
+        - name: "[{{ quota_path }}] Source result"
           ansible.builtin.debug:
             msg: >-
               {{ quota_path }}: hard limit changed from {{ _original_hard_limit_gb }}GB
               to {{ new_quota_gb }}GB -
               {{ 'changed' if quota_change.changed else 'already in desired state, no change' }}.
 
+        - name: "[{{ replication_target_path | default('') }}] (target) Set hard limit to {{ new_quota_gb }}GB"
+          dellemc.powerscale.smartquota:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            path: "{{ replication_target_path }}"
+            quota_type: "{{ quota_type }}"
+            access_zone: "{{ access_zone }}"
+            quota:
+              hard_limit_size: "{{ new_quota_gb }}"
+              cap_unit: "GB"
+            state: "present"
+          register: quota_target_change
+          no_log: true
+          when: _apply_to_target_effective
+
+        - name: "[{{ replication_target_path | default('') }}] Target result"
+          ansible.builtin.debug:
+            msg: >-
+              {{ replication_target_path }} ({{ target_site_obj.onefs_host }}): hard limit changed from
+              {{ _target_original_hard_limit_gb }}GB to {{ new_quota_gb }}GB -
+              {{ 'changed' if quota_target_change.changed else 'already in desired state, no change' }}.
+          when: _apply_to_target_effective
+
       rescue:
-        - name: "ROLLBACK [{{ quota_path }}] - restore original hard limit"
+        - name: "ROLLBACK [{{ quota_path }}] (source) - restore original hard limit"
           dellemc.powerscale.smartquota:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
@@ -173,16 +285,35 @@
               hard_limit_size: "{{ _original_hard_limit_gb }}"
               cap_unit: "GB"
             state: "present"
-          register: rollback_result
+          register: rollback_source_result
           ignore_errors: true
           no_log: true
 
-        - name: Fail the play - report rollback outcome either way
+        - name: "ROLLBACK [{{ replication_target_path | default('') }}] (target) - restore original hard limit"
+          dellemc.powerscale.smartquota:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            path: "{{ replication_target_path }}"
+            quota_type: "{{ quota_type }}"
+            access_zone: "{{ access_zone }}"
+            quota:
+              hard_limit_size: "{{ _target_original_hard_limit_gb }}"
+              cap_unit: "GB"
+            state: "present"
+          register: rollback_target_result
+          ignore_errors: true
+          no_log: true
+          when: _apply_to_target_effective
+
+        - name: Fail the play - report rollback outcome
           ansible.builtin.fail:
             msg: >-
-              The quota change on {{ quota_path }} failed. Rollback
-              {{ 'succeeded - hard limit restored to ' ~ _original_hard_limit_gb ~ 'GB.'
-                 if not rollback_result.failed
-                 else 'ALSO FAILED - manual verification/intervention needed on '
-                      ~ site.onefs_host ~ ' for ' ~ quota_path ~ '.' }}
+              The quota change on {{ quota_path }} failed. Source rollback
+              {{ 'succeeded' if not rollback_source_result.failed
+                 else 'ALSO FAILED - manual verification/intervention needed' }}.
+              {{ ('Target rollback ' ~ ('succeeded' if not rollback_target_result.failed else 'ALSO FAILED - manual verification/intervention needed') ~ '.')
+                 if _apply_to_target_effective else '' }}
       when: (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
