@@ -1,0 +1,456 @@
+---
+# Set up (or tear down) a full DR relationship for one share, fully ad-hoc
+# via extra_vars/Survey - no shares.yml editing needed:
+#   1. Ensures the NFS export (and, if smb_share_name is given, the SMB
+#      share; and, if quota_gb is given, the quota) exist on the TARGET
+#      with the same clients/permissions/size as the source - but only
+#      CREATES them if missing. If the target already has its own
+#      export/share/quota at that path, this playbook leaves it alone
+#      rather than overwriting it - deliberate, conservative default.
+#   2. Creates a real SyncIQ replication policy from source to target.
+#
+# Verified against the real installed dellemc.powerscale 3.10.0 collection
+# (ansible-doc dellemc.powerscale.synciqpolicy) before writing this:
+#   - target_cluster.password IS a real, supported field (write-only,
+#     never returned) - this settles a long-disputed, previously
+#     unresolved question in this repo's Phase 2 skeleton. Password-based
+#     target auth works; TLS certificate exchange is NOT required.
+#   - source_cluster (and its nested source_network) is OPTIONAL - a
+#     policy can be created with no network pool/subnet restriction at
+#     all, which is why network_pool/network_subnet below are optional
+#     and auto-detected/skipped rather than required.
+#   - policy_name is required for CREATION specifically (not globally
+#     required - conditionally required, easy to miss in the docs).
+#   - the schedule field name is `run_job` (choices: on-schedule,
+#     when-source-modified, when-snapshot-taken, manual) despite the
+#     `schedule` field's own doc text referring to "run_policy" - a typo
+#     in the module's own docs, confirmed by checking the real field list.
+#
+# Rollback scope (deliberately limited, per design decision): if anything
+# fails AFTER the SyncIQ policy is created this run, the policy is deleted
+# (state: absent). Newly-created target export/share/quota objects are
+# NOT automatically deleted on failure - those are idempotent-safe to
+# leave in place and retry, unlike a policy that could already be moving
+# data. Not yet live-tested against a running cluster.
+#
+# Required extra_vars:
+#   source_site   site_a | site_b - the replication SOURCE
+#   target_site   site_a | site_b - the replication TARGET (must differ
+#                 from source_site)
+#   share_path    e.g. "/ifs/data/finance" - must be an EXISTING NFS
+#                 export on the source (this playbook mirrors an existing
+#                 share's DR setup, it does not create brand-new shares
+#                 from scratch - use provision_share.yml for that)
+# Optional:
+#   smb_share_name    if set, also mirrors this SMB share (by name) and
+#                     its permissions to the target
+#   quota_gb          if set, also ensures a matching quota (this size)
+#                     exists on the target
+#   target_path       path on the target cluster (default: same as
+#                     share_path)
+#   policy_name       (default: "<last path component>_replication")
+#   schedule          isidate format, e.g. "every 4 hours" - if omitted,
+#                     the policy is created with run_job=manual instead
+#                     of on-schedule (you trigger syncs yourself)
+#   action            sync | copy (default: sync)
+#   network_pool      SyncIQ source network pool (auto-detected if
+#   network_subnet    omitted and the source cluster has exactly one
+#                     pool configured; skipped entirely - no network
+#                     restriction - if zero or more than one exist)
+#   rpo_alert_minutes positive integer, optional
+#   state             present | absent (default: present). absent removes
+#                     ONLY the SyncIQ policy - it does not delete the
+#                     mirrored target export/share/quota, since those may
+#                     have independent value beyond just this policy.
+#
+# Example - set up DR for an NFS-only share, auto-detected network:
+#   ansible-playbook playbooks/setup_share_replication.yml \
+#     -e source_site=site_a \
+#     -e target_site=site_b \
+#     -e share_path=/ifs/data/finance \
+#     -e schedule="every 4 hours"
+#
+# Example - also mirror the SMB share and a quota:
+#   ansible-playbook playbooks/setup_share_replication.yml \
+#     -e source_site=site_a \
+#     -e target_site=site_b \
+#     -e share_path=/ifs/data/finance \
+#     -e smb_share_name=finance_data \
+#     -e quota_gb=500 \
+#     -e schedule="every 4 hours"
+#
+# Example - AWX Survey / extra_vars JSON (first example):
+#   {
+#     "source_site": "site_a",
+#     "target_site": "site_b",
+#     "share_path": "/ifs/data/finance",
+#     "schedule": "every 4 hours"
+#   }
+
+- name: Set up (or tear down) DR replication for one share
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+
+  pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
+    - name: Assert required extra_vars are present and valid
+      ansible.builtin.assert:
+        that:
+          - source_site is defined
+          - source_site in sites
+          - target_site is defined
+          - target_site in sites
+          - source_site != target_site
+          - share_path is defined
+          - share_path | length > 0
+        fail_msg: >-
+          Required: source_site and target_site (one of
+          {{ sites.keys() | join(', ') }}, and different from each other),
+          share_path.
+
+    - name: Resolve working variables
+      ansible.builtin.set_fact:
+        source_site_obj: "{{ sites[source_site] }}"
+        target_site_obj: "{{ sites[target_site] }}"
+        target_path: "{{ target_path | default(share_path) }}"
+        policy_name: "{{ policy_name | default((share_path.split('/') | last) ~ '_replication') }}"
+        action: "{{ action | default('sync') }}"
+        state: "{{ state | default('present') }}"
+
+    - name: Validate action/state
+      ansible.builtin.assert:
+        that:
+          - action in ['sync', 'copy']
+          - state in ['present', 'absent']
+        fail_msg: "action must be sync|copy, state must be present|absent."
+
+    - name: Fail fast if either site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - source_site_obj.onefs_host is defined
+          - source_site_obj.onefs_host | length > 0
+          - source_site_obj.onefs_host != "CHANGE_ME"
+          - source_site_obj.api_password is defined
+          - source_site_obj.api_password != "CHANGE_ME"
+          - target_site_obj.onefs_host is defined
+          - target_site_obj.onefs_host | length > 0
+          - target_site_obj.onefs_host != "CHANGE_ME"
+          - target_site_obj.api_password is defined
+          - target_site_obj.api_password != "CHANGE_ME"
+        fail_msg: >-
+          source_site or target_site is missing required connection
+          fields or still has a CHANGE_ME placeholder - check sites.yml /
+          the attached AWX Credentials.
+      no_log: true
+
+  tasks:
+    # ---- 1. Read the source's current state ----
+    - name: "[source] Capture current NFS export at {{ share_path }}"
+      dellemc.powerscale.nfs:
+        onefs_host: "{{ source_site_obj.onefs_host }}"
+        port_no: "{{ source_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ source_site_obj.api_user }}"
+        api_password: "{{ source_site_obj.api_password }}"
+        path: "{{ share_path }}"
+        state: "present"
+      check_mode: true
+      register: source_nfs
+      no_log: true
+
+    - name: "[source] Capture current SMB share '{{ smb_share_name | default('') }}'"
+      dellemc.powerscale.smb:
+        onefs_host: "{{ source_site_obj.onefs_host }}"
+        port_no: "{{ source_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ source_site_obj.api_user }}"
+        api_password: "{{ source_site_obj.api_password }}"
+        share_name: "{{ smb_share_name }}"
+        state: "present"
+      register: source_smb
+      ignore_errors: true
+      no_log: true
+      when: smb_share_name is defined
+
+    - name: Fail fast if there's nothing to replicate at this path
+      ansible.builtin.fail:
+        msg: >-
+          No NFS export found at '{{ share_path }}' on
+          {{ source_site_obj.onefs_host }} (this playbook mirrors an
+          EXISTING share's DR setup, it does not create brand-new shares -
+          use provision_share.yml for that).
+      when: source_nfs.NFS_export_details is not defined
+
+    - name: Fail fast if smb_share_name was given but doesn't exist on source
+      ansible.builtin.fail:
+        msg: >-
+          smb_share_name='{{ smb_share_name }}' was given but no such SMB
+          share exists on {{ source_site_obj.onefs_host }}.
+      when: >-
+        smb_share_name is defined and
+        (source_smb is failed or source_smb.smb_details.shares | default([]) | length == 0)
+
+    - name: "[source] Capture current quota at {{ share_path }}"
+      dellemc.powerscale.smartquota:
+        onefs_host: "{{ source_site_obj.onefs_host }}"
+        port_no: "{{ source_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ source_site_obj.api_user }}"
+        api_password: "{{ source_site_obj.api_password }}"
+        path: "{{ share_path }}"
+        quota_type: "directory"
+        state: "present"
+      check_mode: true
+      register: source_quota
+      no_log: true
+      when: quota_gb is defined
+
+    - name: Resolve access_zone from the source export
+      ansible.builtin.set_fact:
+        access_zone: "{{ source_nfs.NFS_export_details.zone | default('System') }}"
+
+    # ---- 2. Resolve the SyncIQ source network (optional) ----
+    - name: Resolve network_pool/network_subnet if both already given
+      ansible.builtin.set_fact:
+        _network_resolved: "{{ (network_pool is defined) and (network_subnet is defined) }}"
+
+    - name: Auto-detect the source cluster's network pools, if not given
+      dellemc.powerscale.info:
+        onefs_host: "{{ source_site_obj.onefs_host }}"
+        port_no: "{{ source_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ source_site_obj.api_user }}"
+        api_password: "{{ source_site_obj.api_password }}"
+        gather_subset:
+          - network_pools
+      register: source_pools
+      no_log: true
+      when: not _network_resolved
+
+    - name: Auto-select the pool if exactly one is configured
+      ansible.builtin.set_fact:
+        network_pool: "{{ source_pools.NetworkPools[0].name }}"
+        network_subnet: "{{ source_pools.NetworkPools[0].id.split('.')[1] }}"
+        _network_resolved: true
+      when: >-
+        not _network_resolved and
+        (source_pools.NetworkPools | default([]) | length == 1)
+
+    - name: Report network pool resolution
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Using network_pool=' ~ network_pool ~ ', network_subnet=' ~ network_subnet ~ '.'
+             if _network_resolved
+             else 'No single network pool auto-detected on ' ~ source_site_obj.onefs_host ~
+                  ' (' ~ (source_pools.NetworkPools | default([]) | length) ~ ' found) - ' ~
+                  'creating the policy with no network restriction. Pass network_pool/network_subnet explicitly to set one.' }}
+
+    # ---- 3. Check what already exists on the target ----
+    - name: "[target] Check whether a matching NFS export already exists"
+      dellemc.powerscale.nfs:
+        onefs_host: "{{ target_site_obj.onefs_host }}"
+        port_no: "{{ target_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ target_site_obj.api_user }}"
+        api_password: "{{ target_site_obj.api_password }}"
+        path: "{{ target_path }}"
+        access_zone: "{{ access_zone }}"
+        state: "present"
+      check_mode: true
+      register: target_nfs
+      no_log: true
+
+    - name: "[target] Check whether a matching SMB share already exists"
+      dellemc.powerscale.smb:
+        onefs_host: "{{ target_site_obj.onefs_host }}"
+        port_no: "{{ target_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ target_site_obj.api_user }}"
+        api_password: "{{ target_site_obj.api_password }}"
+        share_name: "{{ smb_share_name }}"
+        state: "present"
+      register: target_smb
+      ignore_errors: true
+      no_log: true
+      when: smb_share_name is defined
+
+    - name: "[target] Check whether a matching quota already exists"
+      dellemc.powerscale.smartquota:
+        onefs_host: "{{ target_site_obj.onefs_host }}"
+        port_no: "{{ target_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ target_site_obj.api_user }}"
+        api_password: "{{ target_site_obj.api_password }}"
+        path: "{{ target_path }}"
+        quota_type: "directory"
+        access_zone: "{{ access_zone }}"
+        state: "present"
+      check_mode: true
+      register: target_quota
+      no_log: true
+      when: quota_gb is defined
+
+    - name: "[policy] Check whether this policy already exists"
+      dellemc.powerscale.synciqpolicy:
+        onefs_host: "{{ source_site_obj.onefs_host }}"
+        port_no: "{{ source_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ source_site_obj.api_user }}"
+        api_password: "{{ source_site_obj.api_password }}"
+        policy_name: "{{ policy_name }}"
+        state: "present"
+      register: policy_before
+      ignore_errors: true
+      no_log: true
+
+    - block:
+        # ---- 4. Create missing target objects (never overwrite existing ones) ----
+        - name: "[target] Create missing NFS export, mirroring source's clients"
+          dellemc.powerscale.nfs:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            path: "{{ target_path }}"
+            access_zone: "{{ access_zone }}"
+            clients: "{{ source_nfs.NFS_export_details.clients | default([]) }}"
+            read_only_clients: "{{ source_nfs.NFS_export_details.read_only_clients | default([]) }}"
+            read_write_clients: "{{ source_nfs.NFS_export_details.read_write_clients | default([]) }}"
+            root_clients: "{{ source_nfs.NFS_export_details.root_clients | default([]) }}"
+            state: "present"
+          register: target_nfs_created
+          no_log: true
+          when: target_nfs.NFS_export_details is not defined and state == 'present'
+
+        - name: "[target] Report NFS export status"
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'Created a new NFS export at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ ', mirroring source clients.'
+                 if target_nfs.NFS_export_details is not defined
+                 else 'Target already has an NFS export at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
+          when: state == 'present'
+
+        - name: "[target] Create missing SMB share, mirroring source's permissions"
+          dellemc.powerscale.smb:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            share_name: "{{ smb_share_name }}"
+            path: "{{ target_path }}"
+            access_zone: "{{ access_zone }}"
+            permissions: "{{ source_smb.smb_details.shares[0].permissions | default([]) }}"
+            state: "present"
+          register: target_smb_created
+          no_log: true
+          when: >-
+            smb_share_name is defined and state == 'present' and
+            (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
+
+        - name: "[target] Report SMB share status"
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'Created a new SMB share \'' ~ smb_share_name ~ '\' on ' ~ target_site_obj.onefs_host ~ ', mirroring source permissions.'
+                 if (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
+                 else 'Target already has an SMB share named \'' ~ smb_share_name ~ '\' - left as-is (not overwritten).' }}
+          when: smb_share_name is defined and state == 'present'
+
+        - name: "[target] Create missing quota ({{ quota_gb | default('') }}GB)"
+          dellemc.powerscale.smartquota:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            path: "{{ target_path }}"
+            quota_type: "directory"
+            access_zone: "{{ access_zone }}"
+            quota:
+              hard_limit_size: "{{ quota_gb }}"
+              cap_unit: "GB"
+            state: "present"
+          register: target_quota_created
+          no_log: true
+          when: quota_gb is defined and state == 'present' and target_quota.quota_details is not defined
+
+        - name: "[target] Report quota status"
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'Created a new ' ~ quota_gb ~ 'GB quota at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ '.'
+                 if target_quota.quota_details is not defined
+                 else 'Target already has a quota at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
+          when: quota_gb is defined and state == 'present'
+
+        # ---- 5. Create/remove the SyncIQ policy itself ----
+        - name: "[policy] {{ 'Create/ensure' if state == 'present' else 'Delete' }} '{{ policy_name }}'"
+          dellemc.powerscale.synciqpolicy:
+            onefs_host: "{{ source_site_obj.onefs_host }}"
+            port_no: "{{ source_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ source_site_obj.api_user }}"
+            api_password: "{{ source_site_obj.api_password }}"
+            policy_name: "{{ policy_name }}"
+            action: "{{ action }}"
+            enabled: true
+            source_cluster: >-
+              {{ {'source_root_path': share_path}
+                 | combine({'source_network': {'pool': network_pool, 'subnet': network_subnet}} if _network_resolved else {}) }}
+            target_cluster:
+              target_host: "{{ target_site_obj.onefs_host }}"
+              target_path: "{{ target_path }}"
+              password: "{{ target_site_obj.api_password }}"
+            run_job: "{{ 'on-schedule' if schedule is defined else 'manual' }}"
+            schedule: "{{ schedule | default(omit) }}"
+            rpo_alert: "{{ rpo_alert_minutes | default(omit) }}"
+            rpo_alert_unit: "{{ 'minutes' if rpo_alert_minutes is defined else omit }}"
+            state: "{{ state }}"
+          register: policy_change
+          no_log: true
+
+        - name: "[policy] Result"
+          ansible.builtin.debug:
+            msg: >-
+              Policy '{{ policy_name }}' ({{ share_path }} -> {{ target_site_obj.onefs_host }}:{{ target_path }}) -
+              {{ 'changed' if policy_change.changed else 'already in desired state, no change' }}.
+
+      rescue:
+        - name: "ROLLBACK [policy] - delete the policy if we just created it"
+          dellemc.powerscale.synciqpolicy:
+            onefs_host: "{{ source_site_obj.onefs_host }}"
+            port_no: "{{ source_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ source_site_obj.api_user }}"
+            api_password: "{{ source_site_obj.api_password }}"
+            policy_name: "{{ policy_name }}"
+            state: "absent"
+          register: rollback_policy_result
+          ignore_errors: true
+          no_log: true
+          when: policy_before is failed or policy_before.synciq_policy_details is not defined
+
+        - name: Fail the play - report what happened
+          ansible.builtin.fail:
+            msg: >-
+              Setting up replication for {{ share_path }} failed.
+              {{ 'The policy was newly created this run and has been deleted (rollback '
+                  ~ ('succeeded' if not (rollback_policy_result.failed | default(false)) else 'ALSO FAILED - manual verification needed')
+                  ~ ').'
+                 if (policy_before is failed or policy_before.synciq_policy_details is not defined)
+                 else 'The policy already existed before this run and was left untouched.' }}
+              Any target export/share/quota created earlier in this run were NOT
+              automatically removed (idempotent-safe to leave in place) - check
+              {{ target_site_obj.onefs_host }} manually if needed.
+      when: state == 'present' or (policy_before is succeeded and policy_before.synciq_policy_details is defined)
+
+    - name: Nothing to do - policy doesn't exist and state=absent
+      ansible.builtin.debug:
+        msg: "Policy '{{ policy_name }}' does not exist - nothing to remove."
+      when: state == 'absent' and (policy_before is failed or policy_before.synciq_policy_details is not defined)
