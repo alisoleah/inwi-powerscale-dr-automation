@@ -494,3 +494,327 @@
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
+
+    # ---- Ad-hoc management templates ----
+    # These four point at the standalone manage_*.yml / setup_share_replication.yml
+    # playbooks - fully extra_vars/Survey-driven, no shares.yml editing needed
+    # for a one-off operation. See each playbook's own header comment for the
+    # full field reference and worked examples.
+    - name: Create/update "PowerScale - Manage NFS Client"
+      awx.awx.job_template:
+        name: "PowerScale - Manage NFS Client"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/manage_nfs_client.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Site"
+              question_description: "Which PowerScale cluster to operate on."
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Export path"
+              question_description: >-
+                Must be an EXISTING NFS export, e.g. /ifs/data/finance.
+                This template edits an export's client list - it does not
+                create new exports.
+              variable: "export_path"
+              type: "text"
+              required: true
+            - question_name: "Client IP or CIDR"
+              question_description: "e.g. 10.20.0.5 or 10.20.0.0/24"
+              variable: "client_ip"
+              type: "text"
+              required: true
+            - question_name: "Action"
+              question_description: "Add or remove this client."
+              variable: "state"
+              type: "multiplechoice"
+              choices: "present\nabsent"
+              required: true
+            - question_name: "Client list (optional)"
+              question_description: >-
+                Which client list to edit. Defaults to 'clients' if left
+                blank.
+              variable: "client_list"
+              type: "multiplechoice"
+              choices: "clients\nread_only_clients\nread_write_clients\nroot_clients"
+              default: "clients"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: "Defaults to System if left blank."
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "Also apply to replication target? (optional)"
+              question_description: >-
+                If true, checks whether this export is covered by a real
+                SyncIQ policy and, if the target already has a matching
+                export, mirrors the same change there too. Defaults to
+                false (source only) if left blank.
+              variable: "apply_to_target"
+              type: "multiplechoice"
+              choices: "false\ntrue"
+              default: "false"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Manage SMB Permission"
+      awx.awx.job_template:
+        name: "PowerScale - Manage SMB Permission"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/manage_smb_permission.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Site"
+              question_description: "Which PowerScale cluster to operate on."
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "SMB share name"
+              question_description: >-
+                Must be an EXISTING SMB share. This template edits
+                permissions - it does not create new shares.
+              variable: "share_name"
+              type: "text"
+              required: true
+            - question_name: "Trustee type"
+              variable: "trustee_type"
+              type: "multiplechoice"
+              choices: "user\ngroup\nwellknown"
+              required: true
+            - question_name: "Trustee name"
+              question_description: >-
+                e.g. INWI\\finance_team for a group, or 'everyone' for
+                wellknown.
+              variable: "trustee_name"
+              type: "text"
+              required: true
+            - question_name: "Permission"
+              variable: "permission"
+              type: "multiplechoice"
+              choices: "read\nwrite\nfull"
+              required: true
+            - question_name: "Action"
+              question_description: "Grant or revoke this permission."
+              variable: "state"
+              type: "multiplechoice"
+              choices: "present\nabsent"
+              required: true
+            - question_name: "Permission type (optional)"
+              question_description: "Defaults to 'allow' if left blank."
+              variable: "permission_type"
+              type: "multiplechoice"
+              choices: "allow\ndeny"
+              default: "allow"
+              required: false
+            - question_name: "Provider type (optional)"
+              question_description: >-
+                Only used when granting a NEW entry. Defaults to 'local'
+                if left blank.
+              variable: "provider_type"
+              type: "multiplechoice"
+              choices: "local\nfile\nads\nldap\nnis"
+              default: "local"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: "Defaults to System if left blank."
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "Also apply to replication target? (optional)"
+              question_description: >-
+                If true, checks whether this share's path is covered by a
+                real SyncIQ policy and, if the target already has a share
+                of the SAME NAME, mirrors the same permission change
+                there too. Defaults to false (source only) if left blank.
+              variable: "apply_to_target"
+              type: "multiplechoice"
+              choices: "false\ntrue"
+              default: "false"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Manage Quota"
+      awx.awx.job_template:
+        name: "PowerScale - Manage Quota"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/manage_quota.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Site"
+              question_description: "Which PowerScale cluster to operate on."
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Quota path"
+              question_description: >-
+                Must have an EXISTING quota, e.g. /ifs/data/finance. This
+                template edits an existing quota's hard limit - it does
+                not create new quotas.
+              variable: "quota_path"
+              type: "text"
+              required: true
+            - question_name: "New hard limit (GB)"
+              variable: "new_quota_gb"
+              type: "integer"
+              required: true
+            - question_name: "Quota type (optional)"
+              question_description: "Defaults to 'directory' if left blank."
+              variable: "quota_type"
+              type: "multiplechoice"
+              choices: "directory\nuser\ngroup\ndefault-user\ndefault-group\ndefault-directory"
+              default: "directory"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: "Defaults to System if left blank."
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "Also apply to replication target? (optional)"
+              question_description: >-
+                If true, checks whether this path is covered by a real
+                SyncIQ policy and, if the target already has a quota
+                there, resizes it to match too. Defaults to false (source
+                only) if left blank.
+              variable: "apply_to_target"
+              type: "multiplechoice"
+              choices: "false\ntrue"
+              default: "false"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
+
+    - name: Create/update "PowerScale - Setup Share Replication"
+      awx.awx.job_template:
+        name: "PowerScale - Setup Share Replication"
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/setup_share_replication.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Source site"
+              variable: "source_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Target site"
+              question_description: "Must differ from the source site."
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Share path (source)"
+              question_description: >-
+                Must be an EXISTING NFS export on the source, e.g.
+                /ifs/data/finance. This mirrors an existing share's DR
+                setup - it does not create brand-new shares from scratch.
+              variable: "share_path"
+              type: "text"
+              required: true
+            - question_name: "SMB share name (optional)"
+              question_description: >-
+                If set, also mirrors this SMB share and its permissions
+                to the target. Leave blank to only handle NFS + the
+                SyncIQ policy.
+              variable: "smb_share_name"
+              type: "text"
+              required: false
+            - question_name: "Quota size, GB (optional)"
+              question_description: >-
+                If set, also ensures a matching quota of this size exists
+                on the target.
+              variable: "quota_gb"
+              type: "integer"
+              required: false
+            - question_name: "Target path (optional)"
+              question_description: "Defaults to the same as the source path if left blank."
+              variable: "target_path"
+              type: "text"
+              required: false
+            - question_name: "Policy name (optional)"
+              question_description: >-
+                Defaults to '<last path component>_replication' if left
+                blank.
+              variable: "policy_name"
+              type: "text"
+              required: false
+            - question_name: "Schedule (optional)"
+              question_description: >-
+                isidate format, e.g. "every 4 hours". If left blank, the
+                policy is created as run_job=manual (you trigger syncs
+                yourself) instead of on a schedule.
+              variable: "schedule"
+              type: "text"
+              required: false
+            - question_name: "Replication action (optional)"
+              question_description: "Defaults to 'sync' if left blank."
+              variable: "action"
+              type: "multiplechoice"
+              choices: "sync\ncopy"
+              default: "sync"
+              required: false
+            - question_name: "Network pool (optional)"
+              question_description: >-
+                SyncIQ source network pool. Auto-detected if left blank
+                and the source cluster has exactly one pool configured;
+                otherwise the policy is created with no network
+                restriction.
+              variable: "network_pool"
+              type: "text"
+              required: false
+            - question_name: "Network subnet (optional)"
+              variable: "network_subnet"
+              type: "text"
+              required: false
+            - question_name: "RPO alert, minutes (optional)"
+              variable: "rpo_alert_minutes"
+              type: "integer"
+              required: false
+            - question_name: "Create or remove the policy? (optional)"
+              question_description: >-
+                present (default) creates/ensures the policy. absent
+                removes ONLY the SyncIQ policy - it does not delete any
+                mirrored target export/share/quota.
+              variable: "state"
+              type: "multiplechoice"
+              choices: "present\nabsent"
+              default: "present"
+              required: false
+        credentials: >-
+          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+        state: present
