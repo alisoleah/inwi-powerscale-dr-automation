@@ -119,7 +119,7 @@
         source_site_obj: "{{ sites[source_site] }}"
         target_site_obj: "{{ sites[target_site] }}"
         target_path: "{{ target_path | default(share_path) }}"
-        policy_name: "{{ policy_name | default((share_path.split('/') | last) ~ '_replication') }}"
+        policy_name: "{{ policy_name | default((share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
         action: "{{ action | default('sync') }}"
         state: "{{ state | default('present') }}"
 
@@ -178,6 +178,20 @@
       no_log: true
       when: smb_share_name is defined
 
+    - name: Convert source SMB permissions to module INPUT shape (for mirroring)
+      ansible.builtin.set_fact:
+        _mirror_permissions: >-
+          {{ _mirror_permissions | default([]) + [
+               ( {'user_name': perm_item.trustee.name} if perm_item.trustee.type == 'user'
+                 else {'group_name': perm_item.trustee.name} if perm_item.trustee.type == 'group'
+                 else {'wellknown': perm_item.trustee.name} )
+               | combine({'permission': perm_item.permission, 'permission_type': perm_item.permission_type})
+             ] }}
+      loop: "{{ (source_smb.smb_details.shares[0].permissions | default([])) if (source_smb is defined and source_smb is not skipped and source_smb is not failed and source_smb.smb_details is defined) else [] }}"
+      loop_control:
+        loop_var: perm_item
+        label: "{{ perm_item.trustee.name }}"
+
     - name: Fail fast if there's nothing to replicate at this path
       ansible.builtin.fail:
         msg: >-
@@ -218,7 +232,7 @@
     # ---- 2. Resolve the SyncIQ source network (optional) ----
     - name: Resolve network_pool/network_subnet if both already given
       ansible.builtin.set_fact:
-        _network_resolved: "{{ (network_pool is defined) and (network_subnet is defined) }}"
+        _network_resolved: "{{ ((network_pool is defined) and (network_subnet is defined)) | bool }}"
 
     - name: Auto-detect the source cluster's network pools, if not given
       dellemc.powerscale.info:
@@ -231,7 +245,7 @@
           - network_pools
       register: source_pools
       no_log: true
-      when: not _network_resolved
+      when: not (_network_resolved | bool)
 
     - name: Auto-select the pool if exactly one is configured
       ansible.builtin.set_fact:
@@ -239,14 +253,14 @@
         network_subnet: "{{ source_pools.NetworkPools[0].id.split('.')[1] }}"
         _network_resolved: true
       when: >-
-        not _network_resolved and
+        not (_network_resolved | bool) and
         (source_pools.NetworkPools | default([]) | length == 1)
 
     - name: Report network pool resolution
       ansible.builtin.debug:
         msg: >-
           {{ 'Using network_pool=' ~ network_pool ~ ', network_subnet=' ~ network_subnet ~ '.'
-             if _network_resolved
+             if (_network_resolved | bool)
              else 'No single network pool auto-detected on ' ~ source_site_obj.onefs_host ~
                   ' (' ~ (source_pools.NetworkPools | default([]) | length) ~ ' found) - ' ~
                   'creating the policy with no network restriction. Pass network_pool/network_subnet explicitly to set one.' }}
@@ -347,7 +361,7 @@
             share_name: "{{ smb_share_name }}"
             path: "{{ target_path }}"
             access_zone: "{{ access_zone }}"
-            permissions: "{{ source_smb.smb_details.shares[0].permissions | default([]) }}"
+            permissions: "{{ _mirror_permissions | default([]) }}"
             state: "present"
           register: target_smb_created
           no_log: true
@@ -402,7 +416,7 @@
             enabled: true
             source_cluster: >-
               {{ {'source_root_path': share_path}
-                 | combine({'source_network': {'pool': network_pool, 'subnet': network_subnet}} if _network_resolved else {}) }}
+                 | combine({'source_network': {'pool': network_pool, 'subnet': network_subnet}} if (_network_resolved | bool) else {}) }}
             target_cluster:
               target_host: "{{ target_site_obj.onefs_host }}"
               target_path: "{{ target_path }}"

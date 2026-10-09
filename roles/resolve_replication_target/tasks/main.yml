@@ -66,7 +66,7 @@
 
 - name: Note whether a covering SyncIQ policy was found
   ansible.builtin.set_fact:
-    replication_found: "{{ _matching_policies | length > 0 }}"
+    replication_found: "{{ (_matching_policies | length > 0) | bool }}"
 
 - name: Get full policy details (needed for target_host, not in the summary list)
   dellemc.powerscale.synciqpolicy:
@@ -79,7 +79,7 @@
     state: present
   register: policy_details
   no_log: true
-  when: replication_found
+  when: replication_found | bool
 
 - name: Resolve which sites.yml key matches the policy's target_host, if any
   ansible.builtin.set_fact:
@@ -88,5 +88,5 @@
           | selectattr('value.onefs_host', 'equalto', policy_details.synciq_policy_details.target_host)
           | map(attribute='key') | list | first) | default('', true) }}
     replication_target_path: "{{ policy_details.synciq_policy_details.target_path | default('') }}"
-  when: replication_found and policy_details.synciq_policy_details is defined
+  when: (replication_found | bool) and policy_details.synciq_policy_details is defined
   no_log: true
