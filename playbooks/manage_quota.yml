@@ -148,19 +148,19 @@
       ansible.builtin.debug:
         msg: >-
           {{ quota_path }}: hard limit is already {{ new_quota_gb }}GB - no change needed.
-      when: (_original_hard_limit_gb | round(2)) == (new_quota_gb | int | round(2))
+      when: (_original_hard_limit_gb | float | round(2)) == (new_quota_gb | int | round(2))
 
     - name: Resolve apply_to_target
       ansible.builtin.set_fact:
         apply_to_target: "{{ apply_to_target | default(false) | bool }}"
-      when: (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+      when: (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
 
     - name: Check for a real replication target, if requested
       ansible.builtin.include_role:
         name: resolve_replication_target
       vars:
         source_path: "{{ quota_path }}"
-      when: apply_to_target | default(false) and (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+      when: apply_to_target | default(false) and (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
 
     - name: Report replication discovery result
       ansible.builtin.debug:
@@ -170,13 +170,13 @@
              else ('Replication target is ' ~ replication_target_site ~ ', but that site is not defined in sites.yml - applying to source only.'
                    if (replication_target_site | default('')) == ''
                    else 'Replication target resolved: ' ~ replication_target_site ~ ' (' ~ replication_target_path ~ ').') }}
-      when: apply_to_target | default(false) and (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+      when: apply_to_target | default(false) and (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
 
     - name: Check whether the target quota actually exists
       when: >-
         (apply_to_target | default(false)) and (replication_found | default(false))
         and (replication_target_site | default('')) != ''
-        and (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+        and (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
       block:
         - name: Resolve target site connection details
           ansible.builtin.set_fact:
@@ -316,4 +316,4 @@
                  else 'ALSO FAILED - manual verification/intervention needed' }}.
               {{ ('Target rollback ' ~ ('succeeded' if not rollback_target_result.failed else 'ALSO FAILED - manual verification/intervention needed') ~ '.')
                  if _apply_to_target_effective else '' }}
-      when: (_original_hard_limit_gb | round(2)) != (new_quota_gb | int | round(2))
+      when: (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
