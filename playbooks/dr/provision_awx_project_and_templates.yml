@@ -806,7 +806,7 @@
         job_type: run
         extra_vars:
           dr_scope: "one"
-          dr_client_become: "{{ dr_client_become }}"
+          dr_client_become: "{{ dr_client_become | default(false) }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -892,7 +892,7 @@
         job_type: run
         extra_vars:
           dr_scope: "list"
-          dr_client_become: "{{ dr_client_become }}"
+          dr_client_become: "{{ dr_client_become | default(false) }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -978,7 +978,7 @@
         job_type: run
         extra_vars:
           dr_scope: "site"
-          dr_client_become: "{{ dr_client_become }}"
+          dr_client_become: "{{ dr_client_become | default(false) }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -1064,7 +1064,7 @@
         job_type: run
         extra_vars:
           dr_scope: "one"
-          dr_client_become: "{{ dr_client_become }}"
+          dr_client_become: "{{ dr_client_become | default(false) }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -1150,7 +1150,7 @@
         job_type: run
         extra_vars:
           dr_scope: "list"
-          dr_client_become: "{{ dr_client_become }}"
+          dr_client_become: "{{ dr_client_become | default(false) }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -1236,7 +1236,7 @@
         job_type: run
         extra_vars:
           dr_scope: "site"
-          dr_client_become: "{{ dr_client_become }}"
+          dr_client_become: "{{ dr_client_become | default(false) }}"
         survey_enabled: true
         survey_spec:
           name: ""
