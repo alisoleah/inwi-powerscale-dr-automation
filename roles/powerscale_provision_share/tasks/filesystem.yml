@@ -17,7 +17,7 @@
         'cap_unit': 'GB',
         'container': true,
         'quota_state': 'present'
-      } if share.quota_gb is defined else omit }}
+      } if share.quota_gb is defined else {} }}
 
 - name: "[{{ share.name }}] Create/ensure directory {{ share.path }}"
   dellemc.powerscale.filesystem:
@@ -46,7 +46,8 @@
     owner:
       name: "{{ share.owner | default('root') }}"
       provider_type: "{{ share.owner_provider_type | default('file') }}"
-    quota: "{{ _fs_quota | default(omit) }}"
+    # set_fact cannot take omit as a value; {} means "no quota"
+    quota: "{{ _fs_quota if (_fs_quota | length > 0) else omit }}"
     state: present
   register: fs_result
 
