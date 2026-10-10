@@ -419,9 +419,9 @@
         - name: "[target] Report SMB share status"
           ansible.builtin.debug:
             msg: >-
-              {{ 'Created a new SMB share \'' ~ smb_share_name ~ '\' on ' ~ target_site_obj.onefs_host ~ ', mirroring source permissions.'
+              {{ "Created a new SMB share '" ~ smb_share_name ~ "' on " ~ target_site_obj.onefs_host ~ ', mirroring source permissions.'
                  if (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
-                 else 'Target already has an SMB share named \'' ~ smb_share_name ~ '\' - left as-is (not overwritten).' }}
+                 else "Target already has an SMB share named '" ~ smb_share_name ~ "' - left as-is (not overwritten)." }}
           when: smb_share_name is defined and state == 'present'
 
         - name: "[target] Create missing quota ({{ quota_gb | default('') }}GB)"
