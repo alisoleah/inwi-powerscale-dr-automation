@@ -98,6 +98,11 @@
     attach_site_credentials: false
     site_a_credential_name: "PowerScale - Site A"
     site_b_credential_name: "PowerScale - Site B"
+    # Optional: name of a "PowerScale - SyncIQ Target Passwords" Credential
+    # (see credential_types_powerscale_sites.yml). Only needed when a target
+    # cluster has a SyncIQ password set. Attached to the templates that can
+    # create SyncIQ policies (Provision Share* and Setup Share Replication).
+    synciq_credential_name: ""
 
   tasks:
     - name: Assert awx_project_scm_type was explicitly set
@@ -276,7 +281,8 @@
           dr_schedule: ""
           dr_rpo_alert_minutes: ""
         credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
         state: present
 
     - name: Create/update "PowerScale - Provision Share (NFS Only)"
@@ -319,7 +325,8 @@
           dr_schedule: ""
           dr_rpo_alert_minutes: ""
         credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
         state: present
 
     - name: Create/update "PowerScale - Provision Share (SMB Only)"
@@ -362,7 +369,8 @@
           dr_schedule: ""
           dr_rpo_alert_minutes: ""
         credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
         state: present
 
     - name: Create/update "PowerScale - Provision Share (Mixed NFS+SMB)"
@@ -409,7 +417,8 @@
           dr_schedule: ""
           dr_rpo_alert_minutes: ""
         credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
         state: present
 
     # ---- Ad-hoc management templates ----
@@ -763,5 +772,6 @@
               default: "present"
               required: false
         credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
         state: present

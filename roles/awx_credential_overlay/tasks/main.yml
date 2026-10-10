@@ -49,7 +49,6 @@
           'api_password': site_a_api_password,
           'network_pool': site_a_network_pool | default(sites.site_a.network_pool, true),
           'network_subnet': site_a_network_subnet | default(sites.site_a.network_subnet, true),
-          'synciq_password': site_a_synciq_password | default(sites.site_a.synciq_password | default(''), true),
         }, recursive=True)
       }, recursive=True) }}"
   when:
@@ -69,7 +68,6 @@
           'api_password': site_b_api_password,
           'network_pool': site_b_network_pool | default(sites.site_b.network_pool, true),
           'network_subnet': site_b_network_subnet | default(sites.site_b.network_subnet, true),
-          'synciq_password': site_b_synciq_password | default(sites.site_b.synciq_password | default(''), true),
         }, recursive=True)
       }, recursive=True) }}"
   when:
@@ -78,4 +76,18 @@
     - site_b_onefs_host is defined
     - site_b_api_user is defined
     - site_b_api_password is defined
+  no_log: true
+
+# SyncIQ target passwords come from a separate, optional credential
+# ("PowerScale - SyncIQ Target Passwords"), so they are overlaid on their
+# own - not tied to the Site A / Site B credentials being attached.
+- name: Overlay optional SyncIQ target passwords, if present
+  ansible.builtin.set_fact:
+    sites: "{{ sites | combine({
+        item: sites[item] | combine({'synciq_password': lookup('ansible.builtin.vars', item ~ '_synciq_password')})
+      }, recursive=True) }}"
+  loop: "{{ ['site_a', 'site_b'] | select('in', sites | default({})) | list }}"
+  loop_control:
+    label: "{{ item }}"
+  when: (lookup('ansible.builtin.vars', item ~ '_synciq_password', default='') | string | length) > 0
   no_log: true
