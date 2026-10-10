@@ -175,6 +175,11 @@
     - name: Create/update "PowerScale - Validate Input"
       awx.awx.job_template:
         name: "PowerScale - Validate Input"
+        description: |-
+          Checks sites.yml + shares.yml (with AWX credentials overlaid). Contacts no cluster.
+          Example extra_vars:
+          {"target_site": "site_a"}
+          target_site: all (default) | site_a | site_b
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/validate_input.yml"
@@ -213,6 +218,11 @@
     - name: Create/update "PowerScale - Provision Share (Dry Run)"
       awx.awx.job_template:
         name: "PowerScale - Provision Share (Dry Run)"
+        description: |-
+          Prints what Provision Share WOULD create from shares.yml. Contacts no cluster.
+          Example extra_vars:
+          {"target_site": "site_a", "share_filter": "finance_data"}
+          share_filter: a name in shares.yml (blank = all shares)
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
@@ -250,6 +260,11 @@
     - name: Create/update "PowerScale - Provision Share"
       awx.awx.job_template:
         name: "PowerScale - Provision Share"
+        description: |-
+          Creates directory, quota, NFS export and/or SMB share as declared in shares.yml.
+          Example extra_vars:
+          {"target_site": "site_a", "share_filter": "finance_data"}
+          share_filter: a name in shares.yml (blank = all shares - use a filter on first runs)
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
@@ -301,6 +316,11 @@
     - name: Create/update "PowerScale - Provision Share (NFS Only)"
       awx.awx.job_template:
         name: "PowerScale - Provision Share (NFS Only)"
+        description: |-
+          Like Provision Share, but creates only the NFS export (+ directory/quota) this run.
+          Example extra_vars:
+          {"target_site": "site_a", "share_filter": "finance_data"}
+          share_filter: required, a name in shares.yml
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
@@ -348,6 +368,11 @@
     - name: Create/update "PowerScale - Provision Share (SMB Only)"
       awx.awx.job_template:
         name: "PowerScale - Provision Share (SMB Only)"
+        description: |-
+          Like Provision Share, but creates only the SMB share (+ directory/quota) this run.
+          Example extra_vars:
+          {"target_site": "site_a", "share_filter": "finance_data"}
+          share_filter: required, a name in shares.yml
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
@@ -395,6 +420,11 @@
     - name: Create/update "PowerScale - Provision Share (Mixed NFS+SMB)"
       awx.awx.job_template:
         name: "PowerScale - Provision Share (Mixed NFS+SMB)"
+        description: |-
+          Creates both the NFS export and the SMB share (+ directory/quota) for one shares.yml entry.
+          Example extra_vars:
+          {"target_site": "site_a", "share_filter": "finance_data"}
+          share_filter: required, a name in shares.yml with protocol: [nfs, smb]
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
@@ -451,6 +481,10 @@
     - name: Create/update "PowerScale - Provision Replication (SyncIQ Config)"
       awx.awx.job_template:
         name: "PowerScale - Provision Replication (SyncIQ Config)"
+        description: |-
+          SKELETON - prints the planned SyncIQ policy from shares.yml, creates nothing. Use "Setup Share Replication" for a real policy.
+          Example extra_vars:
+          {"target_site": "site_a", "share_filter": "finance_data", "synciq_policy_name": "finance_data_replication"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_replication.yml"
@@ -503,6 +537,12 @@
     - name: Create/update "PowerScale - Manage NFS Client"
       awx.awx.job_template:
         name: "PowerScale - Manage NFS Client"
+        description: |-
+          Adds/removes one client on an EXISTING NFS export.
+          Example extra_vars (add):
+          {"target_site": "site_a", "export_path": "/ifs/data/finance", "client_ip": "10.20.0.5", "state": "present"}
+          Example extra_vars (remove from read-only list, mirror to DR target):
+          {"target_site": "site_a", "export_path": "/ifs/data/finance", "client_ip": "10.20.0.5", "client_list": "read_only_clients", "state": "absent", "apply_to_target": "true"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/manage_nfs_client.yml"
@@ -571,6 +611,12 @@
     - name: Create/update "PowerScale - Manage SMB Permission"
       awx.awx.job_template:
         name: "PowerScale - Manage SMB Permission"
+        description: |-
+          Grants/revokes one permission entry on an EXISTING SMB share.
+          Example extra_vars (grant):
+          {"target_site": "site_a", "share_name": "finance_data", "trustee_type": "group", "trustee_name": "INWI\\finance_team", "permission": "write", "provider_type": "ads", "state": "present"}
+          Example extra_vars (revoke):
+          {"target_site": "site_a", "share_name": "finance_data", "trustee_type": "wellknown", "trustee_name": "Everyone", "permission": "read", "state": "absent"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/manage_smb_permission.yml"
@@ -657,6 +703,11 @@
     - name: Create/update "PowerScale - Manage Quota"
       awx.awx.job_template:
         name: "PowerScale - Manage Quota"
+        description: |-
+          Resizes the hard limit of an EXISTING quota.
+          Example extra_vars:
+          {"target_site": "site_a", "quota_path": "/ifs/data/finance", "new_quota_gb": 10}
+          Optional: quota_type (default directory), access_zone, apply_to_target
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/manage_quota.yml"
@@ -716,6 +767,15 @@
     - name: Create/update "PowerScale - Setup Share Replication"
       awx.awx.job_template:
         name: "PowerScale - Setup Share Replication"
+        description: |-
+          Creates a real SyncIQ policy for an EXISTING share and mirrors export/share/quota onto the target (only if missing). The target path's parent directory must exist.
+          Example extra_vars (NFS only):
+          {"source_site": "site_a", "target_site": "site_b", "share_path": "/ifs/data/finance", "schedule": "every 4 hours"}
+          Example extra_vars (SMB only - path taken from the share):
+          {"source_site": "site_a", "target_site": "site_b", "smb_share_name": "hr_docs"}
+          Example extra_vars (mixed + quota):
+          {"source_site": "site_a", "target_site": "site_b", "share_path": "/ifs/data/finance", "smb_share_name": "finance_data", "quota_gb": 500, "schedule": "every 1 days at 22:00", "rpo_alert_minutes": 60}
+          schedule: OneFS format ("every 4 hours", "every 1 days at 22:00"); blank = manual policy
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/setup_share_replication.yml"
