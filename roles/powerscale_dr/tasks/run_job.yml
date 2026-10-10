@@ -1,0 +1,77 @@
+---
+# Start a SyncIQ job and wait for its end state.
+#
+# Inputs:
+#   job_site     site key whose cluster runs the job
+#   job_policy   policy name (as known on job_site)
+#   job_action   '' (normal sync run) | allow_write | resync_prep
+#   job_wait     sync_report    - latest report on job_site must be "finished"
+#                writes_enabled - job_site's target-side view of job_policy
+#                                 must reach failover_failback_state writes_enabled
+#                mirror_created - policy <job_policy>_mirror must exist on mirror_site
+#   mirror_site  (job_wait=mirror_created) site key where the mirror appears
+#   dr_job_timeout_minutes (default 60; blank = 60)
+
+- name: "[{{ job_site }}] Start SyncIQ {{ job_action | default('sync', true) }} job for {{ job_policy }}"
+  ansible.builtin.uri:
+    url: "{{ _dr_api[job_site].base }}/platform/1/sync/jobs"
+    method: POST
+    headers: "{{ _dr_api[job_site].headers }}"
+    validate_certs: "{{ _dr_api[job_site].validate_certs }}"
+    body_format: json
+    body: "{{ {'id': job_policy} | combine({'action': job_action} if (job_action | default('') | length > 0) else {}) }}"
+    status_code: [200, 201]
+  register: _dr_job_start
+  changed_when: true
+
+- name: "[{{ job_site }}] Wait for the {{ job_action | default('sync', true) }} job on {{ job_policy }} to finish"
+  ansible.builtin.uri:
+    url: "{{ _dr_api[job_site].base }}/platform/1/sync/jobs/{{ job_policy | urlencode }}"
+    headers: "{{ _dr_api[job_site].headers }}"
+    validate_certs: "{{ _dr_api[job_site].validate_certs }}"
+    status_code: [200, 404]
+  register: _dr_job_poll
+  until: _dr_job_poll.status == 404 or (_dr_job_poll.json.jobs | default([]) | length == 0)
+  retries: "{{ (dr_job_timeout_minutes | default(60, true) | int) * 6 }}"
+  delay: 10
+
+- name: "[{{ job_site }}] Check sync report for {{ job_policy }}"
+  when: job_wait == 'sync_report'
+  block:
+    - name: "[{{ job_site }}] Read latest report for {{ job_policy }}"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[job_site].base }}/platform/1/sync/reports?policy_name={{ job_policy | urlencode }}&sort=start_time&dir=DESC&limit=1"
+        headers: "{{ _dr_api[job_site].headers }}"
+        validate_certs: "{{ _dr_api[job_site].validate_certs }}"
+      register: _dr_report
+
+    - name: "[{{ job_site }}] Fail if the sync of {{ job_policy }} did not finish"
+      ansible.builtin.fail:
+        msg: >-
+          SyncIQ job for {{ job_policy }} on {{ job_site }} ended in state
+          '{{ (_dr_report.json.reports | default([{}]))[0].state | default('unknown') }}':
+          {{ (_dr_report.json.reports | default([{}]))[0].errors | default([]) | join('; ') }}
+      when: ((_dr_report.json.reports | default([{}]))[0].state | default('')) != 'finished'
+
+- name: "[{{ job_site }}] Wait until writes are enabled for {{ job_policy }}"
+  ansible.builtin.uri:
+    url: "{{ _dr_api[job_site].base }}/platform/1/sync/target/policies/{{ job_policy | urlencode }}"
+    headers: "{{ _dr_api[job_site].headers }}"
+    validate_certs: "{{ _dr_api[job_site].validate_certs }}"
+  register: _dr_target_state
+  until: (_dr_target_state.json.policies | default([{}]))[0].failover_failback_state | default('') == 'writes_enabled'
+  retries: 30
+  delay: 10
+  when: job_wait == 'writes_enabled'
+
+- name: "[{{ mirror_site | default(job_site) }}] Wait until {{ job_policy }}_mirror exists"
+  ansible.builtin.uri:
+    url: "{{ _dr_api[mirror_site].base }}/platform/1/sync/policies/{{ (job_policy ~ '_mirror') | urlencode }}"
+    headers: "{{ _dr_api[mirror_site].headers }}"
+    validate_certs: "{{ _dr_api[mirror_site].validate_certs }}"
+    status_code: [200, 404]
+  register: _dr_mirror
+  until: _dr_mirror.status == 200
+  retries: 30
+  delay: 10
+  when: job_wait == 'mirror_created'

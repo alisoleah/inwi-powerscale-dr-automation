@@ -1,0 +1,261 @@
+---
+# SyncIQ FAILBACK after a planned failover (playbooks/dr_failover.yml):
+# return one, several, or all policies from the DR cluster (dr_site) to the
+# original primary (primary_site), keeping everything written at DR.
+#
+# Dell's resync-prep sequence per policy P (policy P lives on primary_site):
+#   1. resync_prep on primary for P        -> P_mirror on DR (DR -> primary)
+#   2. fence DR path (fence_dr)            -> /ifs/.dr_fence/P_mirror.json on DR
+#   3. sync P_mirror on DR                 -> DR changes copied to primary
+#   4. allow_write on primary for P_mirror -> primary writable
+#   5. resync_prep on DR for P_mirror      -> original direction restored
+#   6. P enabled on primary; un-fence primary (P) and DR (P_mirror)
+# Completed steps are detected and skipped, so a failed run can be
+# re-launched to resume. Then (optional) NFS clients are remounted back.
+#
+# dry_run (default true) runs the preflight and prints the plan only.
+#
+# Inputs (AWX Survey / extra_vars):
+#   dr_scope       one | list | site   (set by the Job Template)
+#   primary_site   site_a | site_b - original primary, to return to
+#   dr_site        site_a | site_b - DR cluster currently serving
+#   policy_name    (scope one)  original policy name, e.g. "finance_replication"
+#   policy_names   (scope list) comma-separated original policy names
+#   target_host_aliases (scope site, optional) names the policies may use
+#                  for the DR cluster, besides dr_site's onefs_host
+#   dry_run        true (default) | false
+#   fence_dr       true (default) | false - fence the DR path during the
+#                  final DR -> primary copy
+#   access_zone    default System
+#   nfs_client_mounts  optional "host:/mount/point, ..." - switched from
+#                  the DR path back to the primary path on client_nfs_server
+#   client_nfs_server  required with nfs_client_mounts (primary SmartConnect)
+#   dr_job_timeout_minutes  default 60 (per SyncIQ job)
+
+- name: PowerScale failback
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+
+  pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
+    - name: Resolve inputs
+      ansible.builtin.set_fact:
+        _dr_scope: "{{ dr_scope | default('list') }}"
+        _dr_dry: "{{ dry_run | default(true) | bool }}"
+        _dr_fence: "{{ fence_dr | default(true) | bool }}"
+        _dr_zone: "{{ access_zone | default('System', true) }}"
+        _dr_names: >-
+          {{ ([policy_name | default('') | string | trim] if (dr_scope | default('list')) == 'one'
+              else (policy_names | default('') | string).split(','))
+             | map('trim') | reject('equalto', '') | unique | list }}
+        _dr_aliases: "{{ (target_host_aliases | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _dr_mounts_raw: "{{ (nfs_client_mounts | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - _dr_scope in ['one', 'list', 'site']
+          - primary_site is defined and primary_site in sites
+          - dr_site is defined and dr_site in sites
+          - primary_site != dr_site
+          - _dr_scope == 'site' or (_dr_names | length > 0)
+          - _dr_mounts_raw | reject('match', '^[A-Za-z0-9._-]+:/\\S*$') | list | length == 0
+          - (_dr_mounts_raw | length == 0) or (client_nfs_server | default('') | string | trim | length > 0)
+        fail_msg: >-
+          Need primary_site and dr_site ({{ sites.keys() | join(' | ') }}, different),
+          and {{ 'policy_name' if _dr_scope == 'one' else 'policy_names (comma-separated)' if _dr_scope == 'list' else '' }}.
+          nfs_client_mounts entries must be "host:/mount/point" (got {{ _dr_mounts_raw }}),
+          and need client_nfs_server.
+
+    - name: Fail fast if either site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - sites[item].onefs_host | default('') | length > 0
+          - sites[item].onefs_host != 'CHANGE_ME'
+          - sites[item].api_password | default('') | length > 0
+          - sites[item].api_password != 'CHANGE_ME'
+        fail_msg: "Site '{{ item }}' is missing connection fields or still has CHANGE_ME - check the attached AWX credential."
+      loop: ["{{ primary_site }}", "{{ dr_site }}"]
+      no_log: true
+
+  tasks:
+    - name: Open API sessions
+      ansible.builtin.include_role:
+        name: powerscale_dr
+        tasks_from: login.yml
+      vars:
+        dr_site_key: "{{ item }}"
+      loop: ["{{ primary_site }}", "{{ dr_site }}"]
+
+    # ---- Resolve the policy list ----
+    - name: "[{{ primary_site }}] List SyncIQ policies"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[primary_site].base }}/platform/1/sync/policies"
+        headers: "{{ _dr_api[primary_site].headers }}"
+        validate_certs: "{{ _dr_api[primary_site].validate_certs }}"
+      register: _dr_src_policies
+
+    - name: Resolve the policies in scope
+      ansible.builtin.set_fact:
+        _dr_target_hosts: "{{ [sites[dr_site].onefs_host] + _dr_aliases }}"
+        _dr_in_scope: >-
+          {{ (_dr_src_policies.json.policies
+              | selectattr('target_host', 'in', [sites[dr_site].onefs_host] + _dr_aliases) | list)
+             if _dr_scope == 'site'
+             else (_dr_src_policies.json.policies | selectattr('name', 'in', _dr_names) | list) }}
+
+    - name: Fail if requested policies don't exist on the primary
+      ansible.builtin.fail:
+        msg: >-
+          Not found on {{ primary_site }} ({{ sites[primary_site].onefs_host }}):
+          {{ _dr_names | difference(_dr_in_scope | map(attribute='name') | list) | join(', ') }}.
+          Policies there: {{ _dr_src_policies.json.policies | map(attribute='name') | join(', ') }}
+      when: _dr_scope != 'site' and (_dr_names | difference(_dr_in_scope | map(attribute='name') | list) | length > 0)
+
+    - name: Fail if no policy is in scope
+      ansible.builtin.fail:
+        msg: >-
+          No SyncIQ policy on {{ primary_site }} targets {{ _dr_target_hosts | join(' / ') }}.
+          Add the name the policies use as target_host to target_host_aliases.
+      when: _dr_in_scope | length == 0
+
+    # ---- Preflight ----
+    # ---- Preflight: where is each policy in the failover/failback cycle? ----
+    - name: "[{{ dr_site }}] Read DR-side state of each policy"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[dr_site].base }}/platform/1/sync/target/policies/{{ item.name | urlencode }}"
+        headers: "{{ _dr_api[dr_site].headers }}"
+        validate_certs: "{{ _dr_api[dr_site].validate_certs }}"
+        status_code: [200, 404]
+      loop: "{{ _dr_in_scope }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _dr_tgt_states
+
+    - name: "[{{ dr_site }}] Look for each <policy>_mirror"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[dr_site].base }}/platform/1/sync/policies/{{ (item.name ~ '_mirror') | urlencode }}"
+        headers: "{{ _dr_api[dr_site].headers }}"
+        validate_certs: "{{ _dr_api[dr_site].validate_certs }}"
+        status_code: [200, 404]
+      loop: "{{ _dr_in_scope }}"
+      loop_control:
+        label: "{{ item.name }}_mirror"
+      register: _dr_mirrors
+
+    - name: "[{{ primary_site }}] Read primary-side state of each <policy>_mirror"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[primary_site].base }}/platform/1/sync/target/policies/{{ (item.name ~ '_mirror') | urlencode }}"
+        headers: "{{ _dr_api[primary_site].headers }}"
+        validate_certs: "{{ _dr_api[primary_site].validate_certs }}"
+        status_code: [200, 404]
+      loop: "{{ _dr_in_scope }}"
+      loop_control:
+        label: "{{ item.name }}_mirror"
+      register: _dr_mirror_states
+
+    - name: Build the preflight report
+      ansible.builtin.set_fact:
+        _dr_preflight: >-
+          {%- set out = namespace(l=[]) -%}
+          {%- for p in _dr_in_scope -%}
+            {%- set t = _dr_tgt_states.results[loop.index0] -%}
+            {%- set m = _dr_mirrors.results[loop.index0] -%}
+            {%- set ms = _dr_mirror_states.results[loop.index0] -%}
+            {%- set tstate = (t.json.policies[0].failover_failback_state if t.status == 200 else 'no target record') -%}
+            {%- set mirror_exists = m.status == 200 -%}
+            {%- set mirror_enabled = mirror_exists and (m.json.policies[0].enabled | bool) -%}
+            {%- set mstate = (ms.json.policies[0].failover_failback_state if ms.status == 200 else 'none') -%}
+            {#- failed over and not yet failed back:
+                  DR writes_enabled, or a failback in progress (mirror exists and is
+                  still the active direction, or primary has writes enabled on it
+                  while P is not yet restored) -#}
+            {%- set in_progress = mirror_exists and (mirror_enabled or mstate == 'writes_enabled' or not (p.enabled | bool)) -%}
+            {%- set todo = tstate == 'writes_enabled' or in_progress -%}
+            {%- set problems = [] -%}
+            {%- if p.target_host not in _dr_target_hosts -%}{%- set problems = problems + ['targets ' ~ p.target_host ~ ', not ' ~ dr_site] -%}{%- endif -%}
+            {%- set out.l = out.l + [{
+                 'name': p.name, 'source_path': p.source_root_path, 'target_path': p.target_path,
+                 'mirror_exists': mirror_exists, 'mirror_target_state': mstate,
+                 'skip': not todo, 'problems': problems,
+                 'line': p.name ~ ': primary ' ~ primary_site ~ ':' ~ p.source_root_path ~ ' <- DR ' ~ dr_site ~ ':' ~ p.target_path
+                         ~ ' | DR state ' ~ tstate ~ ' | ' ~ p.name ~ '_mirror ' ~ ('exists (enabled=' ~ mirror_enabled ~ ', primary-side ' ~ mstate ~ ')' if mirror_exists else 'none')
+                         ~ ('' if todo else ' | NOT FAILED OVER - skipped')
+                         ~ (' | resuming an earlier failback' if (todo and mirror_exists) else '')
+                         ~ (' | PROBLEM: ' ~ (problems | join('; ')) if problems else '')}] -%}
+          {%- endfor -%}
+          {{ out.l | to_json }}
+
+    - name: Preflight report
+      ansible.builtin.debug:
+        msg: "{{ (_dr_preflight | from_json) | map(attribute='line') | list }}"
+
+    - name: Fail on preflight problems
+      ansible.builtin.fail:
+        msg: >-
+          Preflight failed: {{ (_dr_preflight | from_json) | selectattr('problems') | map(attribute='name') | join(', ') }} -
+          {{ (_dr_preflight | from_json) | selectattr('problems') | map(attribute='problems') | flatten | join('; ') }}
+      when: (_dr_preflight | from_json) | selectattr('problems') | list | length > 0
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg:
+          - "{{ 'DRY RUN - nothing will be changed. Set dry_run: false to fail back.' if _dr_dry else 'LIVE RUN - failing back.' }}"
+          - "{{ dr_site }} ({{ sites[dr_site].onefs_host }}) -> back to {{ primary_site }} ({{ sites[primary_site].onefs_host }})"
+          - "Fail back: {{ (_dr_preflight | from_json) | rejectattr('skip') | map(attribute='name') | join(', ') or '(none)' }}"
+          - "Not failed over (skipped): {{ (_dr_preflight | from_json) | selectattr('skip') | map(attribute='name') | join(', ') or '(none)' }}"
+          - "Steps per policy: resync_prep on primary, {{ 'fence DR, ' if _dr_fence else '' }}sync DR->primary, allow_write on primary, resync_prep on DR, un-fence"
+          - "NFS clients to remount to {{ client_nfs_server | default('-') }}: {{ _dr_mounts_raw | join(', ') or '(none)' }}"
+
+    # ---- Execute ----
+    - name: Fail back each policy
+      ansible.builtin.include_role:
+        name: powerscale_dr
+        tasks_from: failback_one.yml
+      loop: "{{ (_dr_preflight | from_json) | rejectattr('skip') | list }}"
+      loop_control:
+        loop_var: dr_policy
+        label: "{{ dr_policy.name }}"
+      when: not _dr_dry
+
+    # ---- Hand over to the client play ----
+    - name: Path map for client remounts (DR path -> primary path)
+      ansible.builtin.set_fact:
+        _dr_path_map: "{{ (_dr_preflight | from_json) | map(attribute='target_path') | zip((_dr_preflight | from_json) | map(attribute='source_path')) | list }}"
+
+    - name: Add NFS clients to the remount group
+      ansible.builtin.add_host:
+        name: "{{ item.split(':', 1)[0] }}"
+        groups: dr_nfs_clients
+        dr_mount_points: "{{ (hostvars[item.split(':', 1)[0]].dr_mount_points | default([])) + [item.split(':', 1)[1]] }}"
+      loop: "{{ _dr_mounts_raw }}"
+      when: not _dr_dry
+
+    - name: Close API sessions
+      ansible.builtin.uri:
+        url: "{{ _dr_api[item].base }}/session/1/session"
+        method: DELETE
+        headers: "{{ _dr_api[item].headers }}"
+        validate_certs: "{{ _dr_api[item].validate_certs }}"
+        status_code: [200, 204, 401]
+      loop: "{{ _dr_api.keys() | list }}"
+      ignore_errors: true
+      no_log: true
+
+- name: Remount NFS clients back to the primary cluster
+  hosts: dr_nfs_clients
+  gather_facts: false
+  vars:
+    dr_direction_map: "{{ hostvars['localhost']['_dr_path_map'] }}"
+    dr_new_server: "{{ client_nfs_server }}"
+  tasks:
+    - name: Remount
+      ansible.builtin.include_role:
+        name: powerscale_dr
+        tasks_from: remount.yml

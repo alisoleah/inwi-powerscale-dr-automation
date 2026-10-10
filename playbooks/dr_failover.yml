@@ -1,0 +1,255 @@
+---
+# PLANNED SyncIQ failover: move one, several, or all policies from the
+# current primary (source_site) to the DR cluster (target_site).
+#
+# Per policy, in order:
+#   1. preflight  - policy exists on source, is enabled, targets target_site,
+#                   no job running; target side not already writes_enabled
+#   2. fence      - (fence_source) source NFS exports on/under the policy's
+#                   source path -> read-only, SMB shares -> read; originals
+#                   saved to /ifs/.dr_fence/<policy>.json on the source
+#   3. final sync - run the policy once more and require "finished"
+#   4. allow_write on target_site -> target path becomes writable
+#   If 2-4 fail before writes are enabled, the source is un-fenced again.
+# Then (optional) NFS clients are remounted over SSH to the target.
+#
+# dry_run (default true) runs the preflight and prints the plan only.
+# Failback: playbooks/dr_failback.yml.
+#
+# Inputs (AWX Survey / extra_vars):
+#   dr_scope       one | list | site   (set by the Job Template)
+#   source_site    site_a | site_b - current primary (where the policies live)
+#   target_site    site_a | site_b - DR cluster
+#   policy_name    (scope one)  e.g. "finance_replication"
+#   policy_names   (scope list) e.g. "finance_replication, hr_replication"
+#   target_host_aliases (scope site, optional) comma-separated names the
+#                  policies may use for the target (SmartConnect name etc.)
+#                  in addition to target_site's onefs_host
+#   dry_run        true (default) | false
+#   fence_source   true (default) | false
+#   access_zone    default System (zone of the exports/shares to fence)
+#   nfs_client_mounts  optional, "host:/mount/point, host2:/mnt/x" -
+#                  each mount is switched from the source path to the
+#                  matching target path on client_nfs_server
+#   client_nfs_server  required with nfs_client_mounts - the name clients
+#                  should mount from after failover (target SmartConnect)
+#   dr_job_timeout_minutes  default 60 (per SyncIQ job)
+#
+# NFS client remount needs an AWX "Machine" credential (SSH, root or sudo)
+# attached to the template. Clients need no Python (raw commands only).
+#
+# Example (one policy, real run):
+#   {"source_site": "site_a", "target_site": "site_b",
+#    "policy_name": "finance_replication", "dry_run": false,
+#    "nfs_client_mounts": "10.20.0.5:/mnt/finance",
+#    "client_nfs_server": "nfs-b.inwi.lan"}
+
+- name: PowerScale planned failover
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all/sites.yml
+
+  pre_tasks:
+    - name: Overlay AWX-injected site credentials, if present
+      ansible.builtin.import_role:
+        name: awx_credential_overlay
+
+    - name: Resolve inputs
+      ansible.builtin.set_fact:
+        _dr_scope: "{{ dr_scope | default('list') }}"
+        _dr_dry: "{{ dry_run | default(true) | bool }}"
+        _dr_fence: "{{ fence_source | default(true) | bool }}"
+        _dr_zone: "{{ access_zone | default('System', true) }}"
+        _dr_names: >-
+          {{ ([policy_name | default('') | string | trim] if (dr_scope | default('list')) == 'one'
+              else (policy_names | default('') | string).split(','))
+             | map('trim') | reject('equalto', '') | unique | list }}
+        _dr_aliases: "{{ (target_host_aliases | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _dr_mounts_raw: "{{ (nfs_client_mounts | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - _dr_scope in ['one', 'list', 'site']
+          - source_site is defined and source_site in sites
+          - target_site is defined and target_site in sites
+          - source_site != target_site
+          - _dr_scope == 'site' or (_dr_names | length > 0)
+          - _dr_mounts_raw | reject('match', '^[A-Za-z0-9._-]+:/\\S*$') | list | length == 0
+          - (_dr_mounts_raw | length == 0) or (client_nfs_server | default('') | string | trim | length > 0)
+        fail_msg: >-
+          Need source_site and target_site ({{ sites.keys() | join(' | ') }}, different),
+          and {{ 'policy_name' if _dr_scope == 'one' else 'policy_names (comma-separated)' if _dr_scope == 'list' else '' }}.
+          nfs_client_mounts entries must be "host:/mount/point" (got {{ _dr_mounts_raw }}),
+          and need client_nfs_server.
+
+    - name: Fail fast if either site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - sites[item].onefs_host | default('') | length > 0
+          - sites[item].onefs_host != 'CHANGE_ME'
+          - sites[item].api_password | default('') | length > 0
+          - sites[item].api_password != 'CHANGE_ME'
+        fail_msg: "Site '{{ item }}' is missing connection fields or still has CHANGE_ME - check the attached AWX credential."
+      loop: ["{{ source_site }}", "{{ target_site }}"]
+      no_log: true
+
+  tasks:
+    - name: Open API sessions
+      ansible.builtin.include_role:
+        name: powerscale_dr
+        tasks_from: login.yml
+      vars:
+        dr_site_key: "{{ item }}"
+      loop: ["{{ source_site }}", "{{ target_site }}"]
+
+    # ---- Resolve the policy list ----
+    - name: "[{{ source_site }}] List SyncIQ policies"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[source_site].base }}/platform/1/sync/policies"
+        headers: "{{ _dr_api[source_site].headers }}"
+        validate_certs: "{{ _dr_api[source_site].validate_certs }}"
+      register: _dr_src_policies
+
+    - name: Resolve the policies in scope
+      ansible.builtin.set_fact:
+        _dr_target_hosts: "{{ [sites[target_site].onefs_host] + _dr_aliases }}"
+        _dr_in_scope: >-
+          {{ (_dr_src_policies.json.policies
+              | selectattr('target_host', 'in', [sites[target_site].onefs_host] + _dr_aliases) | list)
+             if _dr_scope == 'site'
+             else (_dr_src_policies.json.policies | selectattr('name', 'in', _dr_names) | list) }}
+
+    - name: Fail if requested policies don't exist on the source
+      ansible.builtin.fail:
+        msg: >-
+          Not found on {{ source_site }} ({{ sites[source_site].onefs_host }}):
+          {{ _dr_names | difference(_dr_in_scope | map(attribute='name') | list) | join(', ') }}.
+          Policies there: {{ _dr_src_policies.json.policies | map(attribute='name') | join(', ') }}
+      when: _dr_scope != 'site' and (_dr_names | difference(_dr_in_scope | map(attribute='name') | list) | length > 0)
+
+    - name: Fail if no policy is in scope
+      ansible.builtin.fail:
+        msg: >-
+          No SyncIQ policy on {{ source_site }} targets {{ _dr_target_hosts | join(' / ') }}.
+          Add the name the policies use as target_host to target_host_aliases.
+      when: _dr_in_scope | length == 0
+
+    # ---- Preflight ----
+    - name: "[{{ target_site }}] Read target-side state of each policy"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[target_site].base }}/platform/1/sync/target/policies/{{ item.name | urlencode }}"
+        headers: "{{ _dr_api[target_site].headers }}"
+        validate_certs: "{{ _dr_api[target_site].validate_certs }}"
+        status_code: [200, 404]
+      loop: "{{ _dr_in_scope }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _dr_tgt_states
+
+    - name: "[{{ source_site }}] Check for running jobs"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[source_site].base }}/platform/1/sync/jobs/{{ item.name | urlencode }}"
+        headers: "{{ _dr_api[source_site].headers }}"
+        validate_certs: "{{ _dr_api[source_site].validate_certs }}"
+        status_code: [200, 404]
+      loop: "{{ _dr_in_scope }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: _dr_running
+
+    - name: Build the preflight report
+      ansible.builtin.set_fact:
+        _dr_preflight: >-
+          {%- set out = namespace(l=[]) -%}
+          {%- for p in _dr_in_scope -%}
+            {%- set t = _dr_tgt_states.results[loop.index0] -%}
+            {%- set r = _dr_running.results[loop.index0] -%}
+            {%- set tstate = (t.json.policies[0].failover_failback_state if t.status == 200 else 'no target record') -%}
+            {%- set running = r.status == 200 and (r.json.jobs | default([]) | length > 0) -%}
+            {%- set problems = [] -%}
+            {%- if p.target_host not in _dr_target_hosts -%}{%- set problems = problems + ['targets ' ~ p.target_host ~ ', not ' ~ target_site] -%}{%- endif -%}
+            {%- if running -%}{%- set problems = problems + ['a job is running'] -%}{%- endif -%}
+            {%- if t.status != 200 -%}{%- set problems = problems + ['never synced to the target'] -%}{%- endif -%}
+            {%- set out.l = out.l + [{
+                 'name': p.name, 'source_path': p.source_root_path, 'target_path': p.target_path,
+                 'enabled': p.enabled, 'last_job_state': p.last_job_state | default('n/a'),
+                 'last_success': p.last_success | default(0), 'target_state': tstate,
+                 'skip': tstate == 'writes_enabled',
+                 'problems': problems,
+                 'line': p.name ~ ': ' ~ p.source_root_path ~ ' -> ' ~ p.target_host ~ ':' ~ p.target_path
+                         ~ ' | target state ' ~ tstate ~ ' | last job ' ~ (p.last_job_state | default('n/a'))
+                         ~ (' | ALREADY FAILED OVER - skipped' if tstate == 'writes_enabled' else '')
+                         ~ (' | PROBLEM: ' ~ (problems | join('; ')) if problems else '')}] -%}
+          {%- endfor -%}
+          {{ out.l | to_json }}
+
+    - name: Preflight report
+      ansible.builtin.debug:
+        msg: "{{ (_dr_preflight | from_json) | map(attribute='line') | list }}"
+
+    - name: Fail on preflight problems
+      ansible.builtin.fail:
+        msg: >-
+          Preflight failed: {{ (_dr_preflight | from_json) | selectattr('problems') | map(attribute='name') | join(', ') }} -
+          {{ (_dr_preflight | from_json) | selectattr('problems') | map(attribute='problems') | flatten | join('; ') }}
+      when: (_dr_preflight | from_json) | selectattr('problems') | list | length > 0
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg:
+          - "{{ 'DRY RUN - nothing will be changed. Set dry_run: false to fail over.' if _dr_dry else 'LIVE RUN - failing over.' }}"
+          - "{{ source_site }} ({{ sites[source_site].onefs_host }}) -> {{ target_site }} ({{ sites[target_site].onefs_host }})"
+          - "Fail over: {{ (_dr_preflight | from_json) | rejectattr('skip') | map(attribute='name') | join(', ') or '(none)' }}"
+          - "Already failed over (skipped): {{ (_dr_preflight | from_json) | selectattr('skip') | map(attribute='name') | join(', ') or '(none)' }}"
+          - "Steps per policy: {{ 'fence source, ' if _dr_fence else '' }}final sync, allow_write on target"
+          - "NFS clients to remount to {{ client_nfs_server | default('-') }}: {{ _dr_mounts_raw | join(', ') or '(none)' }}"
+
+    # ---- Execute ----
+    - name: Fail over each policy
+      ansible.builtin.include_role:
+        name: powerscale_dr
+        tasks_from: failover_one.yml
+      loop: "{{ (_dr_preflight | from_json) | rejectattr('skip') | list }}"
+      loop_control:
+        loop_var: dr_policy
+        label: "{{ dr_policy.name }}"
+      when: not _dr_dry
+
+    # ---- Hand over to the client play ----
+    - name: Path map for client remounts (source path -> target path)
+      ansible.builtin.set_fact:
+        _dr_path_map: "{{ (_dr_preflight | from_json) | map(attribute='source_path') | zip((_dr_preflight | from_json) | map(attribute='target_path')) | list }}"
+
+    - name: Add NFS clients to the remount group
+      ansible.builtin.add_host:
+        name: "{{ item.split(':', 1)[0] }}"
+        groups: dr_nfs_clients
+        dr_mount_points: "{{ (hostvars[item.split(':', 1)[0]].dr_mount_points | default([])) + [item.split(':', 1)[1]] }}"
+      loop: "{{ _dr_mounts_raw }}"
+      when: not _dr_dry
+
+    - name: Close API sessions
+      ansible.builtin.uri:
+        url: "{{ _dr_api[item].base }}/session/1/session"
+        method: DELETE
+        headers: "{{ _dr_api[item].headers }}"
+        validate_certs: "{{ _dr_api[item].validate_certs }}"
+        status_code: [200, 204, 401]
+      loop: "{{ _dr_api.keys() | list }}"
+      ignore_errors: true
+      no_log: true
+
+- name: Remount NFS clients to the DR cluster
+  hosts: dr_nfs_clients
+  gather_facts: false
+  vars:
+    dr_direction_map: "{{ hostvars['localhost']['_dr_path_map'] }}"
+    dr_new_server: "{{ client_nfs_server }}"
+  tasks:
+    - name: Remount
+      ansible.builtin.include_role:
+        name: powerscale_dr
+        tasks_from: remount.yml

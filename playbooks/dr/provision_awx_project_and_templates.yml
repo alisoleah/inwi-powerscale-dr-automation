@@ -103,6 +103,9 @@
     # cluster has a SyncIQ password set. Attached to the templates that can
     # create SyncIQ policies (Provision Share* and Setup Share Replication).
     synciq_credential_name: ""
+    # Optional: name of an AWX "Machine" (SSH) credential for the NFS client
+    # remount in the DR Failover / Failback templates.
+    client_ssh_credential_name: ""
 
   tasks:
     - name: Assert awx_project_scm_type was explicitly set
@@ -774,4 +777,521 @@
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
+        state: present
+
+    # ---- DR failover / failback (SyncIQ) ----
+    # playbooks/dr_failover.yml (planned failover) and dr_failback.yml
+    # (resync-prep failback), each in 3 scopes: one policy, a
+    # comma-separated policy list, or every policy between the two sites.
+    # dr_scope is fixed per template; everything else is in the Survey.
+    # client_ssh_credential_name (optional) = an AWX "Machine" credential
+    # for the NFS client remount over SSH.
+    - name: Create/update "PowerScale - DR Failover (One Policy)"
+      awx.awx.job_template:
+        name: "PowerScale - DR Failover (One Policy)"
+        description: |-
+          Planned SyncIQ failover: preflight, fence source, final sync, allow_write on the DR cluster; optional NFS client remount.
+          Example extra_vars (dry run):
+          {"source_site": "site_a", "target_site": "site_b", "policy_name": "finance_replication", "dry_run": "true"}
+          Example extra_vars (live, with client remount):
+          {"source_site": "site_a", "target_site": "site_b", "policy_name": "finance_replication", "dry_run": "false", "nfs_client_mounts": "10.20.0.5:/mnt/finance", "client_nfs_server": "nfs-b.inwi.lan"}
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/dr_failover.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          dr_scope: "one"
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Source site (current primary)"
+              variable: "source_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Target site (DR)"
+              question_description: >-
+                Must differ from the source site.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Policy name"
+              question_description: >-
+                SyncIQ policy name as it exists on the source (current primary), e.g. finance_replication.
+              variable: "policy_name"
+              type: "text"
+              required: true
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): preflight + plan only, nothing changed.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Fence the source?"
+              question_description: >-
+                true (default): source NFS exports -> read-only and SMB shares -> read before the final sync; restored on failback.
+              variable: "fence_source"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: >-
+                Zone of the exports/shares to fence. Defaults to System.
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "NFS client mounts (optional)"
+              question_description: >-
+                Comma-separated host:/mount/point, e.g. 10.20.0.5:/mnt/finance, app01:/data. Needs the client SSH (Machine) credential on this template.
+              variable: "nfs_client_mounts"
+              type: "text"
+              required: false
+            - question_name: "Client NFS server (optional)"
+              question_description: >-
+                Name clients mount from AFTER failover (DR SmartConnect name). Required when NFS client mounts are given.
+              variable: "client_nfs_server"
+              type: "text"
+              required: false
+            - question_name: "Job timeout, minutes (optional)"
+              question_description: >-
+                Per SyncIQ job. Defaults to 60.
+              variable: "dr_job_timeout_minutes"
+              type: "integer"
+              required: false
+        credentials: >-
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
+        state: present
+
+    - name: Create/update "PowerScale - DR Failover (Policy List)"
+      awx.awx.job_template:
+        name: "PowerScale - DR Failover (Policy List)"
+        description: |-
+          Planned SyncIQ failover: preflight, fence source, final sync, allow_write on the DR cluster; optional NFS client remount.
+          Example extra_vars (dry run):
+          {"source_site": "site_a", "target_site": "site_b", "policy_names": "finance_replication, hr_replication", "dry_run": "true"}
+          Example extra_vars (live, with client remount):
+          {"source_site": "site_a", "target_site": "site_b", "policy_names": "finance_replication, hr_replication", "dry_run": "false", "nfs_client_mounts": "10.20.0.5:/mnt/finance", "client_nfs_server": "nfs-b.inwi.lan"}
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/dr_failover.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          dr_scope: "list"
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Source site (current primary)"
+              variable: "source_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Target site (DR)"
+              question_description: >-
+                Must differ from the source site.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Policy names (comma-separated)"
+              question_description: >-
+                e.g. finance_replication, hr_replication
+              variable: "policy_names"
+              type: "text"
+              required: true
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): preflight + plan only, nothing changed.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Fence the source?"
+              question_description: >-
+                true (default): source NFS exports -> read-only and SMB shares -> read before the final sync; restored on failback.
+              variable: "fence_source"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: >-
+                Zone of the exports/shares to fence. Defaults to System.
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "NFS client mounts (optional)"
+              question_description: >-
+                Comma-separated host:/mount/point, e.g. 10.20.0.5:/mnt/finance, app01:/data. Needs the client SSH (Machine) credential on this template.
+              variable: "nfs_client_mounts"
+              type: "text"
+              required: false
+            - question_name: "Client NFS server (optional)"
+              question_description: >-
+                Name clients mount from AFTER failover (DR SmartConnect name). Required when NFS client mounts are given.
+              variable: "client_nfs_server"
+              type: "text"
+              required: false
+            - question_name: "Job timeout, minutes (optional)"
+              question_description: >-
+                Per SyncIQ job. Defaults to 60.
+              variable: "dr_job_timeout_minutes"
+              type: "integer"
+              required: false
+        credentials: >-
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
+        state: present
+
+    - name: Create/update "PowerScale - DR Failover (Whole Site)"
+      awx.awx.job_template:
+        name: "PowerScale - DR Failover (Whole Site)"
+        description: |-
+          Planned SyncIQ failover: preflight, fence source, final sync, allow_write on the DR cluster; optional NFS client remount.
+          Example extra_vars (dry run):
+          {"source_site": "site_a", "target_site": "site_b", "target_host_aliases": "", "dry_run": "true"}
+          Example extra_vars (live, with client remount):
+          {"source_site": "site_a", "target_site": "site_b", "target_host_aliases": "", "dry_run": "false", "nfs_client_mounts": "10.20.0.5:/mnt/finance", "client_nfs_server": "nfs-b.inwi.lan"}
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/dr_failover.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          dr_scope: "site"
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Source site (current primary)"
+              variable: "source_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Target site (DR)"
+              question_description: >-
+                Must differ from the source site.
+              variable: "target_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Target host aliases (optional)"
+              question_description: >-
+                Comma-separated names the policies may use for the DR cluster (e.g. its SmartConnect name), in addition to the site credential's OneFS host. Every policy targeting one of these is included.
+              variable: "target_host_aliases"
+              type: "text"
+              required: false
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): preflight + plan only, nothing changed.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Fence the source?"
+              question_description: >-
+                true (default): source NFS exports -> read-only and SMB shares -> read before the final sync; restored on failback.
+              variable: "fence_source"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: >-
+                Zone of the exports/shares to fence. Defaults to System.
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "NFS client mounts (optional)"
+              question_description: >-
+                Comma-separated host:/mount/point, e.g. 10.20.0.5:/mnt/finance, app01:/data. Needs the client SSH (Machine) credential on this template.
+              variable: "nfs_client_mounts"
+              type: "text"
+              required: false
+            - question_name: "Client NFS server (optional)"
+              question_description: >-
+                Name clients mount from AFTER failover (DR SmartConnect name). Required when NFS client mounts are given.
+              variable: "client_nfs_server"
+              type: "text"
+              required: false
+            - question_name: "Job timeout, minutes (optional)"
+              question_description: >-
+                Per SyncIQ job. Defaults to 60.
+              variable: "dr_job_timeout_minutes"
+              type: "integer"
+              required: false
+        credentials: >-
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
+        state: present
+
+    - name: Create/update "PowerScale - DR Failback (One Policy)"
+      awx.awx.job_template:
+        name: "PowerScale - DR Failback (One Policy)"
+        description: |-
+          SyncIQ failback (resync-prep): copy DR changes back, make the primary writable, restore the original direction, un-fence; optional NFS client remount. Re-run to resume.
+          Example extra_vars (dry run):
+          {"primary_site": "site_a", "dr_site": "site_b", "policy_name": "finance_replication", "dry_run": "true"}
+          Example extra_vars (live, with client remount):
+          {"primary_site": "site_a", "dr_site": "site_b", "policy_name": "finance_replication", "dry_run": "false", "nfs_client_mounts": "10.20.0.5:/mnt/finance", "client_nfs_server": "nfs-a.inwi.lan"}
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/dr_failback.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          dr_scope: "one"
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Primary site (to return to)"
+              variable: "primary_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "DR site (currently serving)"
+              question_description: >-
+                Must differ from the primary site.
+              variable: "dr_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Policy name"
+              question_description: >-
+                SyncIQ policy name as it exists on the original primary, e.g. finance_replication.
+              variable: "policy_name"
+              type: "text"
+              required: true
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): preflight + plan only, nothing changed.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Fence the DR site during the copy back?"
+              question_description: >-
+                true (default): DR NFS exports -> read-only and SMB shares -> read during the final DR -> primary copy; restored at the end.
+              variable: "fence_dr"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: >-
+                Zone of the exports/shares to fence. Defaults to System.
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "NFS client mounts (optional)"
+              question_description: >-
+                Comma-separated host:/mount/point, e.g. 10.20.0.5:/mnt/finance, app01:/data. Needs the client SSH (Machine) credential on this template.
+              variable: "nfs_client_mounts"
+              type: "text"
+              required: false
+            - question_name: "Client NFS server (optional)"
+              question_description: >-
+                Name clients mount from AFTER failback (primary SmartConnect name). Required when NFS client mounts are given.
+              variable: "client_nfs_server"
+              type: "text"
+              required: false
+            - question_name: "Job timeout, minutes (optional)"
+              question_description: >-
+                Per SyncIQ job. Defaults to 60.
+              variable: "dr_job_timeout_minutes"
+              type: "integer"
+              required: false
+        credentials: >-
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
+        state: present
+
+    - name: Create/update "PowerScale - DR Failback (Policy List)"
+      awx.awx.job_template:
+        name: "PowerScale - DR Failback (Policy List)"
+        description: |-
+          SyncIQ failback (resync-prep): copy DR changes back, make the primary writable, restore the original direction, un-fence; optional NFS client remount. Re-run to resume.
+          Example extra_vars (dry run):
+          {"primary_site": "site_a", "dr_site": "site_b", "policy_names": "finance_replication, hr_replication", "dry_run": "true"}
+          Example extra_vars (live, with client remount):
+          {"primary_site": "site_a", "dr_site": "site_b", "policy_names": "finance_replication, hr_replication", "dry_run": "false", "nfs_client_mounts": "10.20.0.5:/mnt/finance", "client_nfs_server": "nfs-a.inwi.lan"}
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/dr_failback.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          dr_scope: "list"
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Primary site (to return to)"
+              variable: "primary_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "DR site (currently serving)"
+              question_description: >-
+                Must differ from the primary site.
+              variable: "dr_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Policy names (comma-separated)"
+              question_description: >-
+                e.g. finance_replication, hr_replication
+              variable: "policy_names"
+              type: "text"
+              required: true
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): preflight + plan only, nothing changed.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Fence the DR site during the copy back?"
+              question_description: >-
+                true (default): DR NFS exports -> read-only and SMB shares -> read during the final DR -> primary copy; restored at the end.
+              variable: "fence_dr"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: >-
+                Zone of the exports/shares to fence. Defaults to System.
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "NFS client mounts (optional)"
+              question_description: >-
+                Comma-separated host:/mount/point, e.g. 10.20.0.5:/mnt/finance, app01:/data. Needs the client SSH (Machine) credential on this template.
+              variable: "nfs_client_mounts"
+              type: "text"
+              required: false
+            - question_name: "Client NFS server (optional)"
+              question_description: >-
+                Name clients mount from AFTER failback (primary SmartConnect name). Required when NFS client mounts are given.
+              variable: "client_nfs_server"
+              type: "text"
+              required: false
+            - question_name: "Job timeout, minutes (optional)"
+              question_description: >-
+                Per SyncIQ job. Defaults to 60.
+              variable: "dr_job_timeout_minutes"
+              type: "integer"
+              required: false
+        credentials: >-
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
+        state: present
+
+    - name: Create/update "PowerScale - DR Failback (Whole Site)"
+      awx.awx.job_template:
+        name: "PowerScale - DR Failback (Whole Site)"
+        description: |-
+          SyncIQ failback (resync-prep): copy DR changes back, make the primary writable, restore the original direction, un-fence; optional NFS client remount. Re-run to resume.
+          Example extra_vars (dry run):
+          {"primary_site": "site_a", "dr_site": "site_b", "target_host_aliases": "", "dry_run": "true"}
+          Example extra_vars (live, with client remount):
+          {"primary_site": "site_a", "dr_site": "site_b", "target_host_aliases": "", "dry_run": "false", "nfs_client_mounts": "10.20.0.5:/mnt/finance", "client_nfs_server": "nfs-a.inwi.lan"}
+        organization: "{{ awx_organization }}"
+        project: "{{ awx_project_name }}"
+        playbook: "playbooks/dr_failback.yml"
+        inventory: "{{ awx_inventory_name }}"
+        execution_environment: "{{ ee_name }}"
+        job_type: run
+        extra_vars:
+          dr_scope: "site"
+        survey_enabled: true
+        survey_spec:
+          name: ""
+          description: ""
+          spec:
+            - question_name: "Primary site (to return to)"
+              variable: "primary_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "DR site (currently serving)"
+              question_description: >-
+                Must differ from the primary site.
+              variable: "dr_site"
+              type: "multiplechoice"
+              choices: "site_a\nsite_b"
+              required: true
+            - question_name: "Target host aliases (optional)"
+              question_description: >-
+                Comma-separated names the policies may use for the DR cluster (e.g. its SmartConnect name), in addition to the site credential's OneFS host. Every policy targeting one of these is included.
+              variable: "target_host_aliases"
+              type: "text"
+              required: false
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): preflight + plan only, nothing changed.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Fence the DR site during the copy back?"
+              question_description: >-
+                true (default): DR NFS exports -> read-only and SMB shares -> read during the final DR -> primary copy; restored at the end.
+              variable: "fence_dr"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
+            - question_name: "Access zone (optional)"
+              question_description: >-
+                Zone of the exports/shares to fence. Defaults to System.
+              variable: "access_zone"
+              type: "text"
+              required: false
+            - question_name: "NFS client mounts (optional)"
+              question_description: >-
+                Comma-separated host:/mount/point, e.g. 10.20.0.5:/mnt/finance, app01:/data. Needs the client SSH (Machine) credential on this template.
+              variable: "nfs_client_mounts"
+              type: "text"
+              required: false
+            - question_name: "Client NFS server (optional)"
+              question_description: >-
+                Name clients mount from AFTER failback (primary SmartConnect name). Required when NFS client mounts are given.
+              variable: "client_nfs_server"
+              type: "text"
+              required: false
+            - question_name: "Job timeout, minutes (optional)"
+              question_description: >-
+                Per SyncIQ job. Defaults to 60.
+              variable: "dr_job_timeout_minutes"
+              type: "integer"
+              required: false
+        credentials: >-
+          {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
+             + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
         state: present

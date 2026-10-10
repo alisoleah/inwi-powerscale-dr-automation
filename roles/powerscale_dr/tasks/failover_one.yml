@@ -1,0 +1,65 @@
+---
+# Planned failover of ONE policy (dr_policy = a preflight record from
+# playbooks/dr_failover.yml). Fence -> final sync -> allow_write. If
+# anything fails before writes are enabled on the target, the source is
+# un-fenced again so it keeps serving clients.
+
+- name: "[{{ dr_policy.name }}] Failover"
+  block:
+    - name: "[{{ dr_policy.name }}] Fence the source path"
+      ansible.builtin.include_tasks: fence.yml
+      vars:
+        fence_site: "{{ source_site }}"
+        fence_path: "{{ dr_policy.source_path }}"
+        fence_name: "{{ dr_policy.name }}"
+        fence_zone: "{{ _dr_zone }}"
+      when: _dr_fence | bool
+
+    - name: "[{{ dr_policy.name }}] Final sync"
+      ansible.builtin.include_tasks: run_job.yml
+      vars:
+        job_site: "{{ source_site }}"
+        job_policy: "{{ dr_policy.name }}"
+        job_action: ""
+        job_wait: sync_report
+
+    - name: "[{{ dr_policy.name }}] Allow writes on the target"
+      ansible.builtin.include_tasks: run_job.yml
+      vars:
+        job_site: "{{ target_site }}"
+        job_policy: "{{ dr_policy.name }}"
+        job_action: allow_write
+        job_wait: writes_enabled
+
+    - name: "[{{ dr_policy.name }}] Failed over"
+      ansible.builtin.debug:
+        msg: >-
+          {{ dr_policy.name }}: {{ target_site }}:{{ dr_policy.target_path }} is now writable
+          {{- (' (source ' ~ source_site ~ ':' ~ dr_policy.source_path ~ ' fenced read-only)') if (_dr_fence | bool) else '' }}.
+
+  rescue:
+    - name: "[{{ dr_policy.name }}] Check whether writes got enabled on the target"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[target_site].base }}/platform/1/sync/target/policies/{{ dr_policy.name | urlencode }}"
+        headers: "{{ _dr_api[target_site].headers }}"
+        validate_certs: "{{ _dr_api[target_site].validate_certs }}"
+        status_code: [200, 404]
+      register: _dr_after_fail
+
+    - name: "[{{ dr_policy.name }}] ROLLBACK - un-fence the source (target not writable)"
+      ansible.builtin.include_tasks: unfence.yml
+      vars:
+        fence_site: "{{ source_site }}"
+        fence_name: "{{ dr_policy.name }}"
+      when:
+        - _dr_fence | bool
+        - ((_dr_after_fail.json.policies | default([{}]))[0].failover_failback_state | default('')) != 'writes_enabled'
+
+    - name: "[{{ dr_policy.name }}] Failover failed"
+      ansible.builtin.fail:
+        msg: >-
+          Failover of {{ dr_policy.name }} failed at "{{ ansible_failed_task.name | default('?') }}":
+          {{ ansible_failed_result.msg | default(ansible_failed_result.json | default('see output above')) }}.
+          Target state now: {{ (_dr_after_fail.json.policies | default([{}]))[0].failover_failback_state | default('unknown') }}.
+          {{ 'Source was un-fenced again.' if ((_dr_after_fail.json.policies | default([{}]))[0].failover_failback_state | default('')) != 'writes_enabled'
+             else 'Writes ARE enabled on the target - source left fenced; check clients and SyncIQ state manually.' }}

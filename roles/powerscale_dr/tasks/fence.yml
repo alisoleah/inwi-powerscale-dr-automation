@@ -1,0 +1,122 @@
+---
+# Fence a replicated path: every NFS export on/under it becomes read-only
+# and every SMB share on/under it gets its allow entries set to "read".
+# The ORIGINAL settings are saved first to /ifs/.dr_fence/<fence_name>.json
+# on the same cluster, and unfence.yml restores exactly that. If the file
+# already exists (path already fenced, e.g. a re-run), nothing is
+# re-recorded, so the true originals are never overwritten.
+#
+# Inputs: fence_site, fence_path, fence_name, fence_zone
+
+- name: "[{{ fence_site }}] Look for an existing fence record {{ fence_name }}"
+  ansible.builtin.uri:
+    url: "{{ _dr_api[fence_site].base }}/namespace/ifs/.dr_fence/{{ fence_name | urlencode }}.json"
+    headers: "{{ _dr_api[fence_site].headers }}"
+    validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+    status_code: [200, 404]
+  register: _dr_fence_existing
+
+- name: "[{{ fence_site }}] {{ fence_path }} is already fenced - keeping the original record"
+  ansible.builtin.debug:
+    msg: "/ifs/.dr_fence/{{ fence_name }}.json exists on {{ fence_site }} - fence already in place, originals preserved."
+  when: _dr_fence_existing.status == 200
+
+- name: "[{{ fence_site }}] Fence {{ fence_path }}"
+  when: _dr_fence_existing.status == 404
+  block:
+    - name: "[{{ fence_site }}] List NFS exports"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/platform/2/protocols/nfs/exports?zone={{ fence_zone | urlencode }}&limit=1000"
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+      register: _dr_exports
+
+    - name: "[{{ fence_site }}] List SMB shares"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/platform/1/protocols/smb/shares?zone={{ fence_zone | urlencode }}&limit=1000"
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+      register: _dr_shares
+
+    - name: "[{{ fence_site }}] Build the fence record for {{ fence_path }}"
+      ansible.builtin.set_fact:
+        _dr_fence_record: >-
+          {%- set p = fence_path | regex_replace('/+$', '') -%}
+          {%- set ns = namespace(nfs=[], smb=[]) -%}
+          {%- for e in _dr_exports.json.exports | default([]) -%}
+            {%- if e.paths | select('equalto', p) | list or e.paths | select('match', '^' ~ (p | regex_escape) ~ '/') | list -%}
+              {%- set ns.nfs = ns.nfs + [{'id': e.id, 'paths': e.paths, 'read_only': e.read_only | default(false)}] -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- for s in _dr_shares.json.shares | default([]) -%}
+            {%- if s.path == p or s.path is match('^' ~ (p | regex_escape) ~ '/') -%}
+              {%- set ps = namespace(l=[]) -%}
+              {%- for x in s.permissions | default([]) -%}
+                {%- set ps.l = ps.l + [{'permission': x.permission, 'permission_type': x.permission_type,
+                                        'trustee': {'id': x.trustee.id, 'name': x.trustee.name, 'type': x.trustee.type}}] -%}
+              {%- endfor -%}
+              {%- set ns.smb = ns.smb + [{'name': s.name, 'path': s.path, 'permissions': ps.l}] -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ {'fence_name': fence_name, 'path': p, 'zone': fence_zone, 'nfs': ns.nfs, 'smb': ns.smb} | to_json }}
+
+    - name: "[{{ fence_site }}] Ensure /ifs/.dr_fence exists"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/namespace/ifs/.dr_fence"
+        method: PUT
+        headers: "{{ _dr_api[fence_site].headers | combine({'x-isi-ifs-target-type': 'container', 'x-isi-ifs-access-control': '0700'}) }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        status_code: [200, 201, 204]
+
+    - name: "[{{ fence_site }}] Save original settings to /ifs/.dr_fence/{{ fence_name }}.json"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/namespace/ifs/.dr_fence/{{ fence_name | urlencode }}.json"
+        method: PUT
+        headers: "{{ _dr_api[fence_site].headers | combine({'x-isi-ifs-target-type': 'object', 'Content-Type': 'application/octet-stream'}) }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        body_format: raw
+        body: "{{ _dr_fence_record }}"
+        status_code: [200, 201, 204]
+
+    - name: "[{{ fence_site }}] Set NFS exports under {{ fence_path }} read-only"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/platform/2/protocols/nfs/exports/{{ item.id }}?zone={{ fence_zone | urlencode }}"
+        method: PUT
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        body_format: json
+        body: {"read_only": true}
+        status_code: [200, 204]
+      loop: "{{ (_dr_fence_record | from_json).nfs }}"
+      loop_control:
+        label: "{{ item.paths | join(',') }}"
+      changed_when: true
+
+    - name: "[{{ fence_site }}] Set SMB shares under {{ fence_path }} to read"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/platform/1/protocols/smb/shares/{{ item.name | urlencode }}?zone={{ fence_zone | urlencode }}"
+        method: PUT
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        body_format: json
+        # allow entries -> read, deny entries unchanged, order preserved.
+        # Sent as a ready-made JSON string (passed through as-is by uri).
+        body: >-
+          {%- set out = namespace(l=[]) -%}
+          {%- for x in item.permissions -%}
+            {%- set out.l = out.l + [x | combine({'permission': 'read'}) if x.permission_type == 'allow' else x] -%}
+          {%- endfor -%}
+          {{ {'permissions': out.l} | to_json }}
+        status_code: [200, 204]
+      loop: "{{ (_dr_fence_record | from_json).smb }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: "[{{ fence_site }}] Fenced {{ fence_path }}"
+      ansible.builtin.debug:
+        msg: >-
+          {{ (_dr_fence_record | from_json).nfs | length }} NFS export(s) set read-only,
+          {{ (_dr_fence_record | from_json).smb | length }} SMB share(s) set to read
+          ({{ (_dr_fence_record | from_json).smb | map(attribute='name') | join(', ') }}).
+          Originals in /ifs/.dr_fence/{{ fence_name }}.json.

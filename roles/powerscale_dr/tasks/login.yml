@@ -1,0 +1,35 @@
+---
+# Open a OneFS API session for one site and remember its base URL and
+# auth headers in _dr_api[<site key>]. OneFS has HTTP basic auth to PAPI
+# disabled by default, so - like the dellemc SDK - we use a session
+# (isisessid cookie + X-CSRF-Token + Origin).
+#
+# Input: dr_site_key (site_a | site_b)
+
+- name: "[{{ dr_site_key }}] Open OneFS API session"
+  ansible.builtin.uri:
+    url: "https://{{ sites[dr_site_key].onefs_host }}:{{ sites[dr_site_key].port_no | default(8080) }}/session/1/session"
+    method: POST
+    validate_certs: "{{ sites[dr_site_key].verify_ssl | default(false) }}"
+    body_format: json
+    body:
+      username: "{{ sites[dr_site_key].api_user }}"
+      password: "{{ sites[dr_site_key].api_password }}"
+      services: ["platform", "namespace"]
+    status_code: [200, 201]
+  register: _dr_login
+  no_log: true
+
+- name: "[{{ dr_site_key }}] Remember session"
+  ansible.builtin.set_fact:
+    _dr_api: >-
+      {{ _dr_api | default({}) | combine({dr_site_key: {
+           'base': 'https://' ~ sites[dr_site_key].onefs_host ~ ':' ~ (sites[dr_site_key].port_no | default(8080) | string),
+           'validate_certs': sites[dr_site_key].verify_ssl | default(false),
+           'headers': {
+             'Cookie': 'isisessid=' ~ _dr_login.cookies.isisessid,
+             'X-CSRF-Token': _dr_login.cookies.isicsrf,
+             'Origin': 'https://' ~ sites[dr_site_key].onefs_host ~ ':' ~ (sites[dr_site_key].port_no | default(8080) | string)
+           }
+         }}) }}
+  no_log: true

@@ -1,0 +1,72 @@
+---
+# Runs ON an NFS client (raw commands only - no Python needed there).
+# For each mount point in dr_mount_points: read what it is mounted from
+# now, map the path with dr_direction_map ([[from_path, to_path], ...],
+# longest matching prefix), and remount from dr_new_server:<new path>.
+# /etc/fstab is updated if it has a line for the mount point, keeping its
+# mount options.
+
+- name: "Current mounts on {{ inventory_hostname }}"
+  ansible.builtin.raw: "awk '$3 ~ /^nfs/ {print $2\" \"$1}' /proc/mounts"
+  register: _dr_proc_mounts
+  changed_when: false
+
+- name: "Plan remounts on {{ inventory_hostname }}"
+  ansible.builtin.set_fact:
+    _dr_remounts: >-
+      {%- set ns = namespace(cur={}, out=[]) -%}
+      {%- for l in _dr_proc_mounts.stdout_lines -%}
+        {%- set f = l.split(' ', 1) -%}
+        {%- if f | length == 2 -%}{%- set ns.cur = ns.cur | combine({f[0]: f[1]}) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for mp in dr_mount_points -%}
+        {%- set src = ns.cur.get(mp, '') -%}
+        {%- set path = src.split(':', 1)[1] if ':' in src else '' -%}
+        {%- set best = namespace(frm='', to='') -%}
+        {%- for m in dr_direction_map -%}
+          {%- set frm = m[0] | regex_replace('/+$', '') -%}
+          {%- if (path == frm or path.startswith(frm ~ '/')) and frm | length > best.frm | length -%}
+            {%- set best.frm = frm -%}{%- set best.to = m[1] | regex_replace('/+$', '') -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- set new = (dr_new_server ~ ':' ~ best.to ~ path[best.frm | length:]) if best.frm else '' -%}
+        {%- set action = 'not mounted' if not src else ('no matching policy path' if not new else ('already there' if src == new else 'remount')) -%}
+        {%- set ns.out = ns.out + [{'mp': mp, 'current': src, 'new': new, 'action': action,
+             'line': mp ~ ': ' ~ (src or '-') ~ ' -> ' ~ (new or '-') ~ ' (' ~ action ~ ')'}] -%}
+      {%- endfor -%}
+      {{ ns.out | to_json }}
+
+- name: "Remount plan on {{ inventory_hostname }}"
+  ansible.builtin.debug:
+    msg: "{{ (_dr_remounts | from_json) | map(attribute='line') | list }}"
+
+- name: "Fail for mounts that cannot be switched on {{ inventory_hostname }}"
+  ansible.builtin.fail:
+    msg: >-
+      {{ (_dr_remounts | from_json) | selectattr('action', 'in', ['not mounted', 'no matching policy path']) | map(attribute='mp') | join(', ') }}:
+      not an NFS mount, or not under any failed-over path.
+  when: (_dr_remounts | from_json) | selectattr('action', 'in', ['not mounted', 'no matching policy path']) | list | length > 0
+
+- name: "Remount on {{ inventory_hostname }}"
+  ansible.builtin.raw: |
+    set -e
+    MP='{{ item.mp }}'; NEW='{{ item.new }}'
+    OPTS=$(awk -v mp="$MP" '$1 !~ /^#/ && $2 == mp {print $4}' /etc/fstab)
+    [ -n "$OPTS" ] || OPTS=defaults
+    umount -l "$MP" || true
+    mount -t nfs -o "$OPTS" "$NEW" "$MP"
+    if awk -v mp="$MP" '$1 !~ /^#/ && $2 == mp {f=1} END {exit !f}' /etc/fstab; then
+      cp -p /etc/fstab /etc/fstab.dr-bak
+      awk -v mp="$MP" -v new="$NEW" 'BEGIN{OFS="\t"} $1 !~ /^#/ && $2 == mp {$1 = new} {print}' /etc/fstab.dr-bak > /etc/fstab
+    fi
+    awk -v mp="$MP" '$2 == mp {print "now mounted: " $1 " on " $2}' /proc/mounts
+  loop: "{{ (_dr_remounts | from_json) | selectattr('action', 'equalto', 'remount') | list }}"
+  loop_control:
+    label: "{{ item.mp }}: {{ item.current }} -> {{ item.new }}"
+  become: "{{ dr_client_become | default(false) | bool }}"
+  register: _dr_remount_out
+  changed_when: true
+
+- name: "Result on {{ inventory_hostname }}"
+  ansible.builtin.debug:
+    msg: "{{ _dr_remount_out.results | default([]) | map(attribute='stdout_lines') | flatten | list or ['nothing to remount'] }}"

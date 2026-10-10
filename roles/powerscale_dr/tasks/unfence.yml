@@ -1,0 +1,70 @@
+---
+# Undo fence.yml: restore each NFS export's original read_only flag and
+# each SMB share's original permission list from
+# /ifs/.dr_fence/<fence_name>.json, then delete the record.
+#
+# Inputs: fence_site, fence_name
+
+- name: "[{{ fence_site }}] Read fence record {{ fence_name }}"
+  ansible.builtin.uri:
+    url: "{{ _dr_api[fence_site].base }}/namespace/ifs/.dr_fence/{{ fence_name | urlencode }}.json"
+    headers: "{{ _dr_api[fence_site].headers }}"
+    validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+    return_content: true
+    status_code: [200, 404]
+  register: _dr_unfence_file
+
+- name: "[{{ fence_site }}] Nothing to restore for {{ fence_name }}"
+  ansible.builtin.debug:
+    msg: "No /ifs/.dr_fence/{{ fence_name }}.json on {{ fence_site }} - nothing was fenced (or it was already restored)."
+  when: _dr_unfence_file.status == 404
+
+- name: "[{{ fence_site }}] Restore {{ fence_name }}"
+  when: _dr_unfence_file.status == 200
+  block:
+    - name: "[{{ fence_site }}] Parse fence record"
+      ansible.builtin.set_fact:
+        _dr_unfence: "{{ _dr_unfence_file.content | from_json }}"
+
+    - name: "[{{ fence_site }}] Restore NFS export read_only flags"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/platform/2/protocols/nfs/exports/{{ item.id }}?zone={{ _dr_unfence.zone | urlencode }}"
+        method: PUT
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        body_format: json
+        body:
+          read_only: "{{ item.read_only | bool }}"
+        status_code: [200, 204]
+      loop: "{{ _dr_unfence.nfs }}"
+      loop_control:
+        label: "{{ item.paths | join(',') }} read_only={{ item.read_only }}"
+      changed_when: true
+
+    - name: "[{{ fence_site }}] Restore SMB share permissions"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/platform/1/protocols/smb/shares/{{ item.name | urlencode }}?zone={{ _dr_unfence.zone | urlencode }}"
+        method: PUT
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        body_format: json
+        body: "{{ {'permissions': item.permissions} | to_json }}"
+        status_code: [200, 204]
+      loop: "{{ _dr_unfence.smb }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: "[{{ fence_site }}] Delete fence record {{ fence_name }}"
+      ansible.builtin.uri:
+        url: "{{ _dr_api[fence_site].base }}/namespace/ifs/.dr_fence/{{ fence_name | urlencode }}.json"
+        method: DELETE
+        headers: "{{ _dr_api[fence_site].headers }}"
+        validate_certs: "{{ _dr_api[fence_site].validate_certs }}"
+        status_code: [200, 204]
+
+    - name: "[{{ fence_site }}] Restored {{ fence_name }}"
+      ansible.builtin.debug:
+        msg: >-
+          {{ _dr_unfence.path }}: {{ _dr_unfence.nfs | length }} NFS export(s) and
+          {{ _dr_unfence.smb | length }} SMB share(s) restored to their original settings.
