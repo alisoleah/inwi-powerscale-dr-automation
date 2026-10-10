@@ -6,17 +6,24 @@
 #
 # Verified against the real installed dellemc.powerscale 3.10.0 collection
 # (ansible-doc dellemc.powerscale.smb) before writing this - in particular:
-#   - UNLIKE nfs's client_state, this module's `permissions` param is a
-#     FULL REPLACE of the share's entire permission list - there is no
-#     native per-entry add/remove primitive. This playbook therefore reads
-#     the current list, computes the new list itself (append or filter
-#     out), and submits the whole list - the diffing/idempotency logic is
-#     ours, not the module's.
+#   - UNLIKE nfs's client_state, this module has no per-entry add/remove
+#     primitive, AND its `permissions` param is NOT a full replace: it
+#     MERGES the given list into the share's existing entries (see
+#     make_permissions() in the module source - every trustee already on
+#     the share but absent from the list is kept). So the module can add
+#     or modify an entry, but can never revoke one. This playbook
+#     therefore:
+#       add      -> module, passing ONLY the new entry
+#       revoke   -> OneFS REST API PUT /platform/1/protocols/smb/shares/<name>
+#                   with the full remaining list (a true replace)
+#       rollback -> same REST PUT with the original list
+#     (found on a live cluster: a module-based revoke reported "no change"
+#     and the entry stayed.)
 #   - the return value is `smb_details.shares[0].permissions`, each entry
 #     shaped as {permission, permission_type, trustee: {name, type, id}} -
-#     confirmed from the real docs rather than guessed. The INPUT shape
-#     differs (user_name/group_name/wellknown instead of a trustee dict),
-#     so this playbook converts between the two.
+#     the same shape the REST PUT accepts, so it is reused as-is.
+#   - OneFS stores "write" as "change". The module translates on input,
+#     but reads return "change", so comparisons map write -> change.
 #
 # Required extra_vars:
 #   target_site      site_a | site_b
@@ -168,19 +175,25 @@
           {{ smb_before.msg | default('see task output above') }}
       when: smb_before is failed or smb_before.smb_details.shares is not defined or smb_before.smb_details.shares | length == 0
 
+    # The module's GET returns entries as {permission, permission_type,
+    # trustee: {id, name, type}}. That same shape is what the OneFS REST
+    # API's PUT accepts, so we keep it as-is (trustee id included - no name
+    # re-resolution needed, works for ads/ldap/local alike).
+    # NOTE: OneFS stores "write" as "change" - the module translates on
+    # input, but GET returns "change", so all comparisons use _perm_api.
     - name: Reset permissions accumulator (loops accumulate across runs otherwise - see smb.yml's known bug this project already fixed once)
       ansible.builtin.set_fact:
         _current_permissions: []
+        _perm_api: "{{ 'change' if permission == 'write' else permission }}"
 
-    - name: Convert current permissions to module INPUT shape
+    - name: Capture current permissions in REST API shape (used for revoke + rollback)
       ansible.builtin.set_fact:
         _current_permissions: >-
-          {{ _current_permissions + [
-               ( {'user_name': perm_item.trustee.name} if perm_item.trustee.type == 'user'
-                 else {'group_name': perm_item.trustee.name} if perm_item.trustee.type == 'group'
-                 else {'wellknown': perm_item.trustee.name} )
-               | combine({'permission': perm_item.permission, 'permission_type': perm_item.permission_type})
-             ] }}
+          {{ _current_permissions + [{
+               'permission': perm_item.permission,
+               'permission_type': perm_item.permission_type,
+               'trustee': {'id': perm_item.trustee.id, 'name': perm_item.trustee.name, 'type': perm_item.trustee.type}
+             }] }}
       loop: "{{ smb_before.smb_details.shares[0].permissions | default([]) }}"
       loop_control:
         loop_var: perm_item
@@ -188,47 +201,31 @@
 
     - name: "[{{ share_name }}] Current permissions (before)"
       ansible.builtin.debug:
-        var: _current_permissions
+        msg: "{{ _current_permissions | map(attribute='trustee.name') | zip(_current_permissions | map(attribute='trustee.type'), _current_permissions | map(attribute='permission_type'), _current_permissions | map(attribute='permission')) | map('join', ' ') | list }}"
+
+    # Trustee name compared case-insensitively (OneFS returns "Everyone",
+    # operators type "everyone"). Matching is on the exact entry:
+    # trustee type + name + permission + permission_type.
+    - name: Reset revoke list
+      ansible.builtin.set_fact:
+        _without_entry: []
+
+    - name: Build the list with the target entry filtered out (order preserved - ACL order matters for deny/allow)
+      ansible.builtin.set_fact:
+        _without_entry: "{{ _without_entry + [perm_item] }}"
+      loop: "{{ _current_permissions | default([]) }}"
+      loop_control:
+        loop_var: perm_item
+        label: "{{ perm_item.trustee.name }}"
+      when: >-
+        not (perm_item.trustee.type == trustee_type
+             and (perm_item.trustee.name | lower) == (trustee_name | lower)
+             and perm_item.permission == _perm_api
+             and perm_item.permission_type == permission_type)
 
     - name: Check whether the target entry already exists as specified
       ansible.builtin.set_fact:
-        _entry_already_present: >-
-          {{ (smb_before.smb_details.shares[0].permissions
-             | default([])
-             | selectattr('trustee.name', 'equalto', trustee_name)
-             | selectattr('trustee.type', 'equalto', trustee_type)
-             | selectattr('permission', 'equalto', permission)
-             | selectattr('permission_type', 'equalto', permission_type)
-             | list | length > 0) | bool }}
-
-    - name: Build desired permissions list (add)
-      ansible.builtin.set_fact:
-        _desired_permissions: >-
-          {{ _current_permissions + [
-               ( {'user_name': trustee_name} if trustee_type == 'user'
-                 else {'group_name': trustee_name} if trustee_type == 'group'
-                 else {'wellknown': trustee_name} )
-               | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type})
-             ] }}
-      when: state == 'present' and not (_entry_already_present | bool)
-
-    # wellknown trustees use the key 'wellknown', not 'wellknown_name', so we
-    # match on whichever of user_name/group_name/wellknown is present.
-    - name: Reset desired list for removal
-      ansible.builtin.set_fact:
-        _desired_permissions: []
-      when: state == 'absent' and (_entry_already_present | bool)
-
-    - name: Build desired permissions list (remove)
-      ansible.builtin.set_fact:
-        _desired_permissions: "{{ _desired_permissions + [perm_item] }}"
-      loop: "{{ _current_permissions }}"
-      loop_control:
-        loop_var: perm_item
-        label: "{{ perm_item.user_name | default(perm_item.group_name | default(perm_item.wellknown | default(''))) }}"
-      when: >-
-        state == 'absent' and (_entry_already_present | bool) and
-        (perm_item.user_name | default(perm_item.group_name | default(perm_item.wellknown | default('')))) != trustee_name
+        _entry_already_present: "{{ (_without_entry | length) < (_current_permissions | length) }}"
 
     - name: No change needed - report and skip
       ansible.builtin.debug:
@@ -236,6 +233,13 @@
           {{ share_name }}: {{ trustee_name }} ({{ trustee_type }}, {{ permission }}/{{ permission_type }})
           is already {{ 'present' if state == 'present' else 'absent' }} - no change needed.
       when: (state == 'present' and (_entry_already_present | bool)) or (state == 'absent' and not (_entry_already_present | bool))
+
+    - name: Resolve what to do on the source
+      ansible.builtin.set_fact:
+        _source_action: >-
+          {{ 'add' if (state == 'present' and not (_entry_already_present | bool))
+             else 'remove' if (state == 'absent' and (_entry_already_present | bool))
+             else 'none' }}
 
     - name: Resolve apply_to_target
       ansible.builtin.set_fact:
@@ -296,15 +300,14 @@
             _current_target_permissions: []
           when: smb_target_before is succeeded and smb_target_before.smb_details.shares | default([]) | length > 0
 
-        - name: Convert target's current permissions to module INPUT shape
+        - name: Capture target's current permissions in REST API shape
           ansible.builtin.set_fact:
             _current_target_permissions: >-
-              {{ _current_target_permissions + [
-                   ( {'user_name': perm_item.trustee.name} if perm_item.trustee.type == 'user'
-                     else {'group_name': perm_item.trustee.name} if perm_item.trustee.type == 'group'
-                     else {'wellknown': perm_item.trustee.name} )
-                   | combine({'permission': perm_item.permission, 'permission_type': perm_item.permission_type})
-                 ] }}
+              {{ _current_target_permissions + [{
+                   'permission': perm_item.permission,
+                   'permission_type': perm_item.permission_type,
+                   'trustee': {'id': perm_item.trustee.id, 'name': perm_item.trustee.name, 'type': perm_item.trustee.type}
+                 }] }}
           loop: "{{ smb_target_before.smb_details.shares[0].permissions | default([]) }}"
           loop_control:
             loop_var: perm_item
@@ -319,16 +322,28 @@
              and (smb_target_before is defined) and (smb_target_before is not failed) and (smb_target_before is not skipped)
              and (smb_target_before.smb_details.shares | default([]) | length > 0) }}
 
+    - name: Reset target revoke list
+      ansible.builtin.set_fact:
+        _target_without_entry: []
+      when: _apply_to_target_effective | bool
+
+    - name: Build the target list with the target entry filtered out (order preserved)
+      ansible.builtin.set_fact:
+        _target_without_entry: "{{ _target_without_entry + [perm_item] }}"
+      loop: "{{ _current_target_permissions | default([]) }}"
+      loop_control:
+        loop_var: perm_item
+        label: "{{ perm_item.trustee.name }}"
+      when: >-
+        (_apply_to_target_effective | bool) and
+        not (perm_item.trustee.type == trustee_type
+             and (perm_item.trustee.name | lower) == (trustee_name | lower)
+             and perm_item.permission == _perm_api
+             and perm_item.permission_type == permission_type)
+
     - name: Check whether the target already has this entry as specified
       ansible.builtin.set_fact:
-        _target_entry_already_present: >-
-          {{ (smb_target_before.smb_details.shares[0].permissions
-             | default([])
-             | selectattr('trustee.name', 'equalto', trustee_name)
-             | selectattr('trustee.type', 'equalto', trustee_type)
-             | selectattr('permission', 'equalto', permission)
-             | selectattr('permission_type', 'equalto', permission_type)
-             | list | length > 0) | bool }}
+        _target_entry_already_present: "{{ (_target_without_entry | length) < (_current_target_permissions | length) }}"
       when: _apply_to_target_effective | bool
 
     - name: Target already matches desired state - report and skip target change
@@ -340,35 +355,29 @@
         (_apply_to_target_effective | bool) and
         ((state == 'present' and (_target_entry_already_present | bool)) or (state == 'absent' and not (_target_entry_already_present | bool)))
 
-    - name: Build desired permissions list for the target (add)
+    - name: Resolve what to do on the target
       ansible.builtin.set_fact:
-        _desired_target_permissions: >-
-          {{ _current_target_permissions + [
-               ( {'user_name': trustee_name} if trustee_type == 'user'
-                 else {'group_name': trustee_name} if trustee_type == 'group'
-                 else {'wellknown': trustee_name} )
-               | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type})
-             ] }}
-      when: (_apply_to_target_effective | bool) and state == 'present' and not (_target_entry_already_present | bool)
+        _target_action: >-
+          {{ 'none' if not (_apply_to_target_effective | bool)
+             else 'add' if (state == 'present' and not (_target_entry_already_present | bool))
+             else 'remove' if (state == 'absent' and (_target_entry_already_present | bool))
+             else 'none' }}
 
-    - name: Reset desired target list for removal
-      ansible.builtin.set_fact:
-        _desired_target_permissions: []
-      when: (_apply_to_target_effective | bool) and state == 'absent' and (_target_entry_already_present | bool)
-
-    - name: Build desired permissions list for the target (remove)
-      ansible.builtin.set_fact:
-        _desired_target_permissions: "{{ _desired_target_permissions + [perm_item] }}"
-      loop: "{{ _current_target_permissions | default([]) }}"
-      loop_control:
-        loop_var: perm_item
-        label: "{{ perm_item.user_name | default(perm_item.group_name | default(perm_item.wellknown | default(''))) }}"
-      when: >-
-        (_apply_to_target_effective | bool) and state == 'absent' and (_target_entry_already_present | bool) and
-        (perm_item.user_name | default(perm_item.group_name | default(perm_item.wellknown | default('')))) != trustee_name
-
+    # Write paths:
+    #   add    -> dellemc.powerscale.smb with ONLY the new entry. The module
+    #             MERGES the given list into the share's existing entries
+    #             (make_permissions() keeps every trustee not in the list),
+    #             so passing just the new entry adds it without re-resolving
+    #             any existing trustee by name.
+    #   remove -> OneFS REST API PUT of the full remaining list. The module
+    #             cannot revoke: because of that same merge, an entry left
+    #             out of `permissions` is silently kept (confirmed in the
+    #             3.10.0 module source and on a live cluster). PUT on
+    #             /platform/1/protocols/smb/shares/<name> REPLACES the list.
+    #   rollback -> REST PUT of the original list, for the same reason (a
+    #             module-based rollback could never undo an add).
     - block:
-        - name: "[{{ share_name }}] (source) Apply desired permissions list"
+        - name: "[{{ share_name }}] (source) Add {{ trustee_name }}"
           dellemc.powerscale.smb:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
@@ -377,21 +386,42 @@
             api_password: "{{ site.api_password }}"
             share_name: "{{ share_name }}"
             access_zone: "{{ access_zone }}"
-            permissions: "{{ _desired_permissions }}"
+            permissions:
+              - "{{ ({'user_name': trustee_name} if trustee_type == 'user'
+                     else {'group_name': trustee_name} if trustee_type == 'group'
+                     else {'wellknown': trustee_name})
+                    | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
             state: "present"
           register: smb_change
           no_log: true
-          when: _desired_permissions is defined
+          when: _source_action == 'add'
+
+        - name: "[{{ share_name }}] (source) Remove {{ trustee_name }}"
+          ansible.builtin.uri:
+            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            method: PUT
+            url_username: "{{ site.api_user }}"
+            url_password: "{{ site.api_password }}"
+            force_basic_auth: true
+            validate_certs: "{{ site.verify_ssl | default(false) }}"
+            body_format: json
+            body:
+              permissions: "{{ _without_entry }}"
+            status_code: [200, 204]
+          register: smb_change
+          changed_when: true
+          no_log: true
+          when: _source_action == 'remove'
 
         - name: "[{{ share_name }}] Source result"
           ansible.builtin.debug:
             msg: >-
-              {{ trustee_name }} {{ 'added to' if state == 'present' else 'removed from' }}
+              {{ trustee_name }} {{ 'added to' if _source_action == 'add' else 'removed from' }}
               {{ share_name }}'s permissions -
               {{ 'changed' if smb_change.changed else 'already in desired state, no change' }}.
-          when: _desired_permissions is defined
+          when: _source_action != 'none'
 
-        - name: "[{{ share_name }}] (target) Apply desired permissions list"
+        - name: "[{{ share_name }}] (target) Add {{ trustee_name }}"
           dellemc.powerscale.smb:
             onefs_host: "{{ target_site_obj.onefs_host }}"
             port_no: "{{ target_site_obj.port_no | default(8080) }}"
@@ -400,52 +430,75 @@
             api_password: "{{ target_site_obj.api_password }}"
             share_name: "{{ share_name }}"
             access_zone: "{{ access_zone }}"
-            permissions: "{{ _desired_target_permissions }}"
+            permissions:
+              - "{{ ({'user_name': trustee_name} if trustee_type == 'user'
+                     else {'group_name': trustee_name} if trustee_type == 'group'
+                     else {'wellknown': trustee_name})
+                    | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
             state: "present"
           register: smb_target_change
           no_log: true
-          when: _desired_target_permissions is defined
+          when: _target_action == 'add'
+
+        - name: "[{{ share_name }}] (target) Remove {{ trustee_name }}"
+          ansible.builtin.uri:
+            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            method: PUT
+            url_username: "{{ target_site_obj.api_user }}"
+            url_password: "{{ target_site_obj.api_password }}"
+            force_basic_auth: true
+            validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
+            body_format: json
+            body:
+              permissions: "{{ _target_without_entry }}"
+            status_code: [200, 204]
+          register: smb_target_change
+          changed_when: true
+          no_log: true
+          when: _target_action == 'remove'
 
         - name: "[{{ share_name }}] Target result"
           ansible.builtin.debug:
             msg: >-
-              {{ trustee_name }} {{ 'added to' if state == 'present' else 'removed from' }}
+              {{ trustee_name }} {{ 'added to' if _target_action == 'add' else 'removed from' }}
               {{ share_name }}'s permissions on {{ target_site_obj.onefs_host }} -
               {{ 'changed' if smb_target_change.changed else 'already in desired state, no change' }}.
-          when: _desired_target_permissions is defined
+          when: _target_action != 'none'
 
       rescue:
         - name: "ROLLBACK [{{ share_name }}] (source) - restore original permission list"
-          dellemc.powerscale.smb:
-            onefs_host: "{{ site.onefs_host }}"
-            port_no: "{{ site.port_no | default(8080) }}"
-            verify_ssl: "{{ site.verify_ssl | default(false) }}"
-            api_user: "{{ site.api_user }}"
-            api_password: "{{ site.api_password }}"
-            share_name: "{{ share_name }}"
-            access_zone: "{{ access_zone }}"
-            permissions: "{{ _current_permissions }}"
-            state: "present"
+          ansible.builtin.uri:
+            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            method: PUT
+            url_username: "{{ site.api_user }}"
+            url_password: "{{ site.api_password }}"
+            force_basic_auth: true
+            validate_certs: "{{ site.verify_ssl | default(false) }}"
+            body_format: json
+            body:
+              permissions: "{{ _current_permissions }}"
+            status_code: [200, 204]
           register: rollback_source_result
           ignore_errors: true
           no_log: true
-          when: _desired_permissions is defined
+          when: _source_action != 'none'
 
         - name: "ROLLBACK [{{ share_name }}] (target) - restore original permission list"
-          dellemc.powerscale.smb:
-            onefs_host: "{{ target_site_obj.onefs_host }}"
-            port_no: "{{ target_site_obj.port_no | default(8080) }}"
-            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
-            api_user: "{{ target_site_obj.api_user }}"
-            api_password: "{{ target_site_obj.api_password }}"
-            share_name: "{{ share_name }}"
-            access_zone: "{{ access_zone }}"
-            permissions: "{{ _current_target_permissions }}"
-            state: "present"
+          ansible.builtin.uri:
+            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            method: PUT
+            url_username: "{{ target_site_obj.api_user }}"
+            url_password: "{{ target_site_obj.api_password }}"
+            force_basic_auth: true
+            validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
+            body_format: json
+            body:
+              permissions: "{{ _current_target_permissions }}"
+            status_code: [200, 204]
           register: rollback_target_result
           ignore_errors: true
           no_log: true
-          when: _desired_target_permissions is defined
+          when: _target_action != 'none'
 
         - name: Fail the play - report rollback outcome
           ansible.builtin.fail:
@@ -454,5 +507,5 @@
               {{ 'succeeded' if not (rollback_source_result.failed | default(false))
                  else 'ALSO FAILED - manual verification/intervention needed' }}.
               {{ ('Target rollback ' ~ ('succeeded' if not (rollback_target_result.failed | default(false)) else 'ALSO FAILED - manual verification/intervention needed') ~ '.')
-                 if _desired_target_permissions is defined else '' }}
-      when: _desired_permissions is defined or _desired_target_permissions is defined
+                 if _target_action != 'none' else '' }}
+      when: _source_action != 'none' or _target_action != 'none'

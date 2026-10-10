@@ -136,6 +136,9 @@
       register: nfs_before
       no_log: true
 
+    # The dellemc.powerscale modules ALWAYS return their *_details key -
+    # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
+    # 'is defined' is always true. Test for emptiness instead.
     - name: Fail fast if no export exists yet at this path
       ansible.builtin.fail:
         msg: >-
@@ -143,7 +146,7 @@
           {{ site.onefs_host }} - this playbook only edits an EXISTING
           export's client list, it does not create new exports (use
           provision_share.yml for that).
-      when: nfs_before.NFS_export_details is not defined
+      when: (nfs_before.NFS_export_details | default({}, true) | length == 0)
 
     - name: "[{{ export_path }}] Current client lists (before)"
       ansible.builtin.debug:
@@ -201,7 +204,7 @@
               No NFS export found at {{ replication_target_path }} on
               {{ target_site_obj.onefs_host }} (the replication target) -
               applying to source only.
-          when: nfs_target_before.NFS_export_details is not defined
+          when: (nfs_target_before.NFS_export_details | default({}, true) | length == 0)
 
     - name: Resolve whether we'll actually touch the target this run
       ansible.builtin.set_fact:
@@ -209,7 +212,7 @@
           {{ (_apply_req | bool) and (replication_found | default(false) | bool)
              and (replication_target_site | default('')) != ''
              and (nfs_target_before is defined)
-             and (nfs_target_before.NFS_export_details is defined) }}
+             and ((nfs_target_before.NFS_export_details | default({}, true) | length > 0)) }}
 
     - block:
         - name: "[{{ export_path }}] (source) {{ 'Add' if state == 'present' else 'Remove' }} {{ client_ip }} {{ 'to' if state == 'present' else 'from' }} {{ client_list }}"

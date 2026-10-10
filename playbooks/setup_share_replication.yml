@@ -192,6 +192,9 @@
         loop_var: perm_item
         label: "{{ perm_item.trustee.name }}"
 
+    # The dellemc.powerscale modules ALWAYS return their *_details key -
+    # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
+    # 'is defined' is always true. Test for emptiness instead.
     - name: Fail fast if there's nothing to replicate at this path
       ansible.builtin.fail:
         msg: >-
@@ -199,7 +202,7 @@
           {{ source_site_obj.onefs_host }} (this playbook mirrors an
           EXISTING share's DR setup, it does not create brand-new shares -
           use provision_share.yml for that).
-      when: source_nfs.NFS_export_details is not defined
+      when: (source_nfs.NFS_export_details | default({}, true) | length == 0)
 
     - name: Fail fast if smb_share_name was given but doesn't exist on source
       ansible.builtin.fail:
@@ -341,13 +344,13 @@
             state: "present"
           register: target_nfs_created
           no_log: true
-          when: target_nfs.NFS_export_details is not defined and state == 'present'
+          when: (target_nfs.NFS_export_details | default({}, true) | length == 0) and state == 'present'
 
         - name: "[target] Report NFS export status"
           ansible.builtin.debug:
             msg: >-
               {{ 'Created a new NFS export at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ ', mirroring source clients.'
-                 if target_nfs.NFS_export_details is not defined
+                 if (target_nfs.NFS_export_details | default({}, true) | length == 0)
                  else 'Target already has an NFS export at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
           when: state == 'present'
 
@@ -393,13 +396,13 @@
             state: "present"
           register: target_quota_created
           no_log: true
-          when: quota_gb is defined and state == 'present' and target_quota.quota_details is not defined
+          when: quota_gb is defined and state == 'present' and (target_quota.quota_details | default({}, true) | length == 0)
 
         - name: "[target] Report quota status"
           ansible.builtin.debug:
             msg: >-
               {{ 'Created a new ' ~ quota_gb ~ 'GB quota at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ '.'
-                 if target_quota.quota_details is not defined
+                 if (target_quota.quota_details | default({}, true) | length == 0)
                  else 'Target already has a quota at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
           when: quota_gb is defined and state == 'present'
 
@@ -448,7 +451,7 @@
           register: rollback_policy_result
           ignore_errors: true
           no_log: true
-          when: policy_before is failed or policy_before.synciq_policy_details is not defined
+          when: policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0)
 
         - name: Fail the play - report what happened
           ansible.builtin.fail:
@@ -457,14 +460,14 @@
               {{ 'The policy was newly created this run and has been deleted (rollback '
                   ~ ('succeeded' if not (rollback_policy_result.failed | default(false)) else 'ALSO FAILED - manual verification needed')
                   ~ ').'
-                 if (policy_before is failed or policy_before.synciq_policy_details is not defined)
+                 if (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
                  else 'The policy already existed before this run and was left untouched.' }}
               Any target export/share/quota created earlier in this run were NOT
               automatically removed (idempotent-safe to leave in place) - check
               {{ target_site_obj.onefs_host }} manually if needed.
-      when: state == 'present' or (policy_before is succeeded and policy_before.synciq_policy_details is defined)
+      when: state == 'present' or (policy_before is succeeded and (policy_before.synciq_policy_details | default({}, true) | length > 0))
 
     - name: Nothing to do - policy doesn't exist and state=absent
       ansible.builtin.debug:
         msg: "Policy '{{ policy_name }}' does not exist - nothing to remove."
-      when: state == 'absent' and (policy_before is failed or policy_before.synciq_policy_details is not defined)
+      when: state == 'absent' and (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))

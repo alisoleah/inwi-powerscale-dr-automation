@@ -126,6 +126,9 @@
       register: quota_before
       no_log: true
 
+    # The dellemc.powerscale modules ALWAYS return their *_details key -
+    # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
+    # 'is defined' is always true. Test for emptiness instead.
     - name: Fail fast if no quota exists yet at this path
       ansible.builtin.fail:
         msg: >-
@@ -133,7 +136,7 @@
           {{ site.onefs_host }} - this playbook only edits an EXISTING
           quota's hard limit, it does not create new quotas (use
           provision_share.yml for that).
-      when: quota_before.quota_details is not defined
+      when: (quota_before.quota_details | default({}, true) | length == 0)
 
     - name: Resolve the original hard limit, in GB (bytes -> GB, for rollback)
       ansible.builtin.set_fact:
@@ -203,13 +206,13 @@
               No {{ quota_type }} quota found at {{ replication_target_path }}
               on {{ target_site_obj.onefs_host }} (the replication target) -
               applying to source only.
-          when: quota_target_before.quota_details is not defined
+          when: (quota_target_before.quota_details | default({}, true) | length == 0)
 
         - name: Resolve the target's original hard limit, in GB
           ansible.builtin.set_fact:
             _target_original_hard_limit_gb: >-
               {{ (quota_target_before.quota_details.thresholds.hard | default(0) | int) / (1024 ** 3) }}
-          when: quota_target_before.quota_details is defined
+          when: (quota_target_before.quota_details | default({}, true) | length > 0)
 
     - name: Resolve whether we'll actually touch the target this run
       ansible.builtin.set_fact:
@@ -217,7 +220,7 @@
           {{ (apply_to_target | default(false)) and (replication_found | default(false))
              and (replication_target_site | default('')) != ''
              and (quota_target_before is defined)
-             and (quota_target_before.quota_details is defined) }}
+             and ((quota_target_before.quota_details | default({}, true) | length > 0)) }}
 
     - block:
         - name: "[{{ quota_path }}] (source) Set hard limit to {{ new_quota_gb }}GB"

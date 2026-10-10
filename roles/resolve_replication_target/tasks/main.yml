@@ -88,5 +88,5 @@
           | selectattr('value.onefs_host', 'equalto', policy_details.synciq_policy_details.target_host)
           | map(attribute='key') | list | first) | default('', true) }}
     replication_target_path: "{{ policy_details.synciq_policy_details.target_path | default('') }}"
-  when: (replication_found | bool) and policy_details.synciq_policy_details is defined
+  when: (replication_found | bool) and (policy_details.synciq_policy_details | default({}, true) | length > 0)
   no_log: true
