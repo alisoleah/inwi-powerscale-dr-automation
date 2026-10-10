@@ -23,6 +23,8 @@ sites:
     api_password: "CHANGE_ME"
     network_pool: "CHANGE_ME"      # e.g. "pool0" - PENDING INWI
     network_subnet: "CHANGE_ME"    # e.g. "subnet0" - PENDING INWI
+    # synciq_password: ""          # optional - only if this cluster, as a SyncIQ
+                                    # target, has `isi sync settings modify --password`
 
   site_b:
     onefs_host: "CHANGE_ME"
@@ -32,6 +34,8 @@ sites:
     api_password: "CHANGE_ME"
     network_pool: "CHANGE_ME"      # PENDING INWI
     network_subnet: "CHANGE_ME"    # PENDING INWI
+    # synciq_password: ""          # optional - only if this cluster, as a SyncIQ
+                                    # target, has `isi sync settings modify --password`
     # synciq_target_certificate_id: ""    # PENDING - see open question 5 in
     # synciq_target_certificate_name: ""  # roles/powerscale_provision_replication.
     # Mutually exclusive with each other. Only needed on whichever site is

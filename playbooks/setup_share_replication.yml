@@ -11,10 +11,16 @@
 #
 # Verified against the real installed dellemc.powerscale 3.10.0 collection
 # (ansible-doc dellemc.powerscale.synciqpolicy) before writing this:
-#   - target_cluster.password IS a real, supported field (write-only,
-#     never returned) - this settles a long-disputed, previously
-#     unresolved question in this repo's Phase 2 skeleton. Password-based
-#     target auth works; TLS certificate exchange is NOT required.
+#   - target_cluster.password is the SyncIQ TARGET password - it must
+#     match the password set on the target cluster with
+#     `isi sync settings modify --password`, and must NOT be sent when the
+#     target has none (the job then fails with "Authentication with target
+#     failed" - found on a live cluster). It is NOT the API/root password,
+#     so it comes from the optional per-site synciq_password (AWX
+#     credential field "SyncIQ Target Password", or sites.yml).
+#   - if the target requires encrypted SyncIQ (isi sync settings view ->
+#     Encryption Required), SyncIQ certificates are needed - not handled
+#     here yet.
 #   - source_cluster (and its nested source_network) is OPTIONAL - a
 #     policy can be created with no network pool/subnet restriction at
 #     all, which is why network_pool/network_subnet below are optional
@@ -499,10 +505,10 @@
             source_cluster: >-
               {{ {'source_root_path': _share_path}
                  | combine({'source_network': {'pool': _network_pool, 'subnet': _network_subnet}} if (_network_resolved | bool) else {}) }}
-            target_cluster:
-              target_host: "{{ target_site_obj.onefs_host }}"
-              target_path: "{{ _target_path }}"
-              password: "{{ target_site_obj.api_password }}"
+            target_cluster: >-
+              {{ {'target_host': target_site_obj.onefs_host, 'target_path': _target_path}
+                 | combine({'password': target_site_obj.synciq_password}
+                           if (target_site_obj.synciq_password | default('') | string | length > 0) else {}) }}
             run_job: "{{ 'on-schedule' if (_schedule_given | bool) else 'manual' }}"
             schedule: "{{ schedule if (_schedule_given | bool) else omit }}"
             rpo_alert: "{{ (rpo_alert_minutes | int) if (_rpo_given | bool) else omit }}"
