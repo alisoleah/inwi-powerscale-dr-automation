@@ -118,7 +118,9 @@
         _dr_target_hosts: "{{ [sites[target_site].onefs_host] + _dr_aliases }}"
         _dr_in_scope: >-
           {{ (_dr_src_policies.json.policies
-              | selectattr('target_host', 'in', [sites[target_site].onefs_host] + _dr_aliases) | list)
+              | selectattr('target_host', 'in', [sites[target_site].onefs_host] + _dr_aliases)
+              | selectattr('enabled')
+              | rejectattr('name', 'match', '.*_mirror$') | list)
              if _dr_scope == 'site'
              else (_dr_src_policies.json.policies | selectattr('name', 'in', _dr_names) | list) }}
 

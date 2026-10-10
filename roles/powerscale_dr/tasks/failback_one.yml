@@ -20,7 +20,7 @@
         job_action: resync_prep
         job_wait: mirror_created
         mirror_site: "{{ dr_site }}"
-      when: not (dr_policy.mirror_exists | bool)
+      when: not (dr_policy.resync_done | bool)
 
     - name: "[{{ dr_policy.name }}] 2. Fence the DR path"
       ansible.builtin.include_tasks: fence.yml
@@ -38,7 +38,7 @@
         job_policy: "{{ dr_policy.name }}_mirror"
         job_action: ""
         job_wait: sync_report
-      when: dr_policy.mirror_target_state != 'writes_enabled'
+      when: not ((dr_policy.resync_done | bool) and dr_policy.mirror_target_state == 'writes_enabled')
 
     - name: "[{{ dr_policy.name }}] 4. allow_write on {{ primary_site }}"
       ansible.builtin.include_tasks: run_job.yml
@@ -47,7 +47,7 @@
         job_policy: "{{ dr_policy.name }}_mirror"
         job_action: allow_write
         job_wait: writes_enabled
-      when: dr_policy.mirror_target_state != 'writes_enabled'
+      when: not ((dr_policy.resync_done | bool) and dr_policy.mirror_target_state == 'writes_enabled')
 
     - name: "[{{ dr_policy.name }}] 5. resync_prep on {{ dr_site }} (restores {{ primary_site }} -> {{ dr_site }})"
       ansible.builtin.include_tasks: run_job.yml

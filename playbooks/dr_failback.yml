@@ -106,7 +106,8 @@
         _dr_target_hosts: "{{ [sites[dr_site].onefs_host] + _dr_aliases }}"
         _dr_in_scope: >-
           {{ (_dr_src_policies.json.policies
-              | selectattr('target_host', 'in', [sites[dr_site].onefs_host] + _dr_aliases) | list)
+              | selectattr('target_host', 'in', [sites[dr_site].onefs_host] + _dr_aliases)
+              | rejectattr('name', 'match', '.*_mirror$') | list)
              if _dr_scope == 'site'
              else (_dr_src_policies.json.policies | selectattr('name', 'in', _dr_names) | list) }}
 
@@ -176,18 +177,22 @@
                   DR writes_enabled, or a failback in progress (mirror exists and is
                   still the active direction, or primary has writes enabled on it
                   while P is not yet restored) -#}
-            {%- set in_progress = mirror_exists and (mirror_enabled or mstate == 'writes_enabled' or not (p.enabled | bool)) -%}
+            {#- A *_mirror left over from an earlier, completed cycle is disabled;
+                  resync_prep in THIS cycle enables it (or writes are already
+                  enabled on the primary for it). -#}
+            {%- set resync_done = mirror_exists and (mirror_enabled or mstate == 'writes_enabled') -%}
+            {%- set in_progress = resync_done or (mirror_exists and not (p.enabled | bool)) -%}
             {%- set todo = tstate == 'writes_enabled' or in_progress -%}
             {%- set problems = [] -%}
             {%- if p.target_host not in _dr_target_hosts -%}{%- set problems = problems + ['targets ' ~ p.target_host ~ ', not ' ~ dr_site] -%}{%- endif -%}
             {%- set out.l = out.l + [{
                  'name': p.name, 'source_path': p.source_root_path, 'target_path': p.target_path,
-                 'mirror_exists': mirror_exists, 'mirror_target_state': mstate,
+                 'mirror_exists': mirror_exists, 'resync_done': resync_done, 'mirror_target_state': mstate,
                  'skip': not todo, 'problems': problems,
                  'line': p.name ~ ': primary ' ~ primary_site ~ ':' ~ p.source_root_path ~ ' <- DR ' ~ dr_site ~ ':' ~ p.target_path
                          ~ ' | DR state ' ~ tstate ~ ' | ' ~ p.name ~ '_mirror ' ~ ('exists (enabled=' ~ mirror_enabled ~ ', primary-side ' ~ mstate ~ ')' if mirror_exists else 'none')
                          ~ ('' if todo else ' | NOT FAILED OVER - skipped')
-                         ~ (' | resuming an earlier failback' if (todo and mirror_exists) else '')
+                         ~ (' | resuming an earlier failback' if (todo and resync_done) else '')
                          ~ (' | PROBLEM: ' ~ (problems | join('; ')) if problems else '')}] -%}
           {%- endfor -%}
           {{ out.l | to_json }}
