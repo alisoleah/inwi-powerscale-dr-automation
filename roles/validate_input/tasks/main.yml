@@ -1,8 +1,9 @@
 ---
-# Pure local validation of sites.yml / shares.yml. Does NOT contact any
+# Pure local validation of sites.yml (cluster connection details, with the
+# AWX Site A / Site B credentials overlaid). Does NOT contact any
 # PowerScale cluster - no dellemc.powerscale module is used anywhere in
-# this file. Import this role at the top of every playbook that consumes
-# sites.yml / shares.yml so bad input is caught before any API call.
+# this file. Share definitions are no longer read from shares.yml: every
+# provisioning / ad-hoc playbook validates its own extra_vars.
 #
 # Run standalone at any time with: ansible-playbook playbooks/validate_input.yml
 
@@ -72,122 +73,9 @@
   loop_control:
     label: "{{ item }}"
 
-- name: Fail fast if shares is not defined or empty
-  ansible.builtin.assert:
-    that:
-      - shares is defined
-      - shares is sequence
-      - shares | length > 0
-    fail_msg: "shares.yml must define a non-empty 'shares' list. See group_vars/all/shares.yml."
-    success_msg: "shares list present ({{ shares | default([]) | length }} share(s))."
-
-- name: Fail if share names are not unique
-  ansible.builtin.assert:
-    that:
-      - (shares | map(attribute='name') | list | unique | length) == (shares | length)
-    fail_msg: "Duplicate share name(s) detected in shares.yml - every share must have a unique 'name'."
-
-- name: Validate each share's basic fields (name, path, protocol, primary_site)
-  ansible.builtin.assert:
-    that:
-      - item.name is defined
-      - item.name | length > 0
-      - item.name is match("^[a-zA-Z0-9_-]+$")
-      - item.path is defined
-      - item.path is match("^/ifs/")
-      - item.protocol is defined
-      - item.protocol is sequence
-      - item.protocol | length > 0
-      - (item.protocol | difference(['nfs', 'smb'])) | length == 0
-      - item.primary_site is defined
-      - item.primary_site in sites
-    fail_msg: >-
-      Share '{{ item.name | default('(unnamed)') }}' failed basic validation - check
-      name (alphanumeric/underscore/hyphen only), path (must start with /ifs/),
-      protocol (non-empty list containing only 'nfs' and/or 'smb'), and
-      primary_site (must match a key in sites.yml).
-  loop: "{{ shares }}"
-  loop_control:
-    label: "{{ item.name | default('(unnamed)') }}"
-
-- name: Validate quota_gb is a positive integer when set
-  ansible.builtin.assert:
-    that:
-      - item.quota_gb | int > 0
-    fail_msg: "Share '{{ item.name }}': quota_gb must be a positive integer if set."
-  loop: "{{ shares }}"
-  loop_control:
-    label: "{{ item.name }}"
-  when: item.quota_gb is defined
-
-- name: Validate nfs_clients is present and non-empty when protocol includes nfs
-  ansible.builtin.assert:
-    that:
-      - item.nfs_clients is defined
-      - item.nfs_clients | length > 0
-    fail_msg: "Share '{{ item.name }}': protocol includes 'nfs' but nfs_clients is missing or empty."
-  loop: "{{ shares }}"
-  loop_control:
-    label: "{{ item.name }}"
-  when: "'nfs' in item.protocol"
-
-- name: Validate smb_permissions is present and non-empty when protocol includes smb
-  ansible.builtin.assert:
-    that:
-      - item.smb_permissions is defined
-      - item.smb_permissions | length > 0
-    fail_msg: "Share '{{ item.name }}': protocol includes 'smb' but smb_permissions is missing or empty."
-  loop: "{{ shares }}"
-  loop_control:
-    label: "{{ item.name }}"
-  when: "'smb' in item.protocol"
-
-- name: Validate each smb_permissions entry has a user or group, and a valid permission
-  ansible.builtin.assert:
-    that:
-      - (item.1.user is defined) or (item.1.group is defined)
-      - item.1.permission is defined
-      - item.1.permission in ['read', 'write', 'full']
-    fail_msg: >-
-      Share '{{ item.0.name }}': each smb_permissions entry needs a 'user' or
-      'group' key, and 'permission' must be one of read / write / full (the
-      exact values the dellemc.powerscale.smb module accepts - NOT
-      read_write / full_control).
-  loop: "{{ shares | subelements('smb_permissions', skip_missing=True) }}"
-  loop_control:
-    label: "{{ item.0.name }}"
-  when: "'smb' in item.0.protocol"
-
-- name: Validate replication block is present and internally consistent
-  ansible.builtin.assert:
-    that:
-      - item.replication is defined
-      - item.replication.target_site is defined
-      - item.replication.target_site in sites
-      - item.replication.target_site != item.primary_site
-      - item.replication.schedule is defined
-      - item.replication.schedule | length > 0
-    fail_msg: >-
-      Share '{{ item.name }}': replication block invalid - target_site must be
-      a valid site key different from primary_site, and schedule must be a
-      non-empty string.
-  loop: "{{ shares }}"
-  loop_control:
-    label: "{{ item.name }}"
-
-- name: Validate rpo_alert_minutes is a positive integer when set
-  ansible.builtin.assert:
-    that:
-      - item.replication.rpo_alert_minutes | int > 0
-    fail_msg: "Share '{{ item.name }}': replication.rpo_alert_minutes must be a positive integer if set."
-  loop: "{{ shares }}"
-  loop_control:
-    label: "{{ item.name }}"
-  when: item.replication is defined and item.replication.rpo_alert_minutes is defined
-
 - name: All input validated successfully
   ansible.builtin.debug:
     msg: >-
-      sites.yml and shares.yml passed all validation checks
-      ({{ sites | length }} site(s), {{ shares | length }} share(s)).
+      sites.yml (with AWX credentials overlaid) passed all validation
+      checks ({{ active_sites | length }} site(s) checked).
       No PowerScale cluster has been contacted yet.

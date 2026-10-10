@@ -1,3 +1,9 @@
+# NOT READ BY ANY TEMPLATE ANY MORE - kept as a reference example only.
+# Shares are now defined per run through extra_vars on the
+# "PowerScale - Provision Share*" templates (see
+# playbooks/provision_share.yml). Only the legacy skeleton
+# playbooks/provision_replication.yml still reads this file.
+#
 ---
 # One entry per share to provision (Phase 1) and replicate (Phase 2).
 # Every field's validation rule is enforced by roles/validate_input BEFORE

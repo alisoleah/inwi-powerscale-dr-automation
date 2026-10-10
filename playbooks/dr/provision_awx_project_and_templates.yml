@@ -2,10 +2,22 @@
 # Provisions the AWX Project (GitLab-backed OR manual/local-path - your
 # choice, see awx_project_scm_type below), a minimal localhost Inventory
 # (PowerScale modules talk to clusters over REST API, not SSH - no real
-# managed hosts needed), and the 3 Job Templates this repo currently ships:
-#   - PowerScale - Validate Input
-#   - PowerScale - Provision Share (Dry Run)
-#   - PowerScale - Provision Share
+# managed hosts needed), and the 9 Job Templates this repo ships:
+#   - PowerScale - Validate Input                    (Survey)
+#   - PowerScale - Provision Share                   (extra vars, no Survey)
+#   - PowerScale - Provision Share (NFS Only)        (extra vars, no Survey)
+#   - PowerScale - Provision Share (SMB Only)        (extra vars, no Survey)
+#   - PowerScale - Provision Share (Mixed NFS+SMB)   (extra vars, no Survey)
+#   - PowerScale - Manage NFS Client                 (Survey)
+#   - PowerScale - Manage SMB Permission             (Survey)
+#   - PowerScale - Manage Quota                      (Survey)
+#   - PowerScale - Setup Share Replication           (Survey)
+# Every template's description carries example extra_vars.
+#
+# Removed (no longer created here - delete by hand in AWX if present):
+#   "PowerScale - Provision Share (Dry Run)" (dry_run is now an extra var)
+#   "PowerScale - Provision Replication (SyncIQ Config)" (skeleton; use
+#   Setup Share Replication, or dr_site on the Provision Share templates)
 #
 # Run this ONCE per environment (idempotent - safe to re-run, matches on
 # name). Needs the awx.awx collection - same offline install pattern as
@@ -176,7 +188,7 @@
       awx.awx.job_template:
         name: "PowerScale - Validate Input"
         description: |-
-          Checks sites.yml + shares.yml (with AWX credentials overlaid). Contacts no cluster.
+          Checks the site connection details (sites.yml with the attached AWX Site A / Site B credentials overlaid). Contacts no cluster.
           Example extra_vars:
           {"target_site": "site_a"}
           target_site: all (default) | site_a | site_b
@@ -215,152 +227,97 @@
               required: false
         state: present
 
-    - name: Create/update "PowerScale - Provision Share (Dry Run)"
-      awx.awx.job_template:
-        name: "PowerScale - Provision Share (Dry Run)"
-        description: |-
-          Prints what Provision Share WOULD create from shares.yml. Contacts no cluster.
-          Example extra_vars:
-          {"target_site": "site_a", "share_filter": "finance_data"}
-          share_filter: a name in shares.yml (blank = all shares)
-        organization: "{{ awx_organization }}"
-        project: "{{ awx_project_name }}"
-        playbook: "playbooks/provision_share.yml"
-        inventory: "{{ awx_inventory_name }}"
-        execution_environment: "{{ ee_name }}"
-        job_type: run
-        extra_vars:
-          share_dry_run: true
-        survey_enabled: true
-        survey_spec:
-          name: ""
-          description: ""
-          spec:
-            - question_name: "Target site"
-              question_description: >-
-                Restrict this run to shares whose primary_site matches.
-                'all' (default) processes every eligible share, same as
-                before this field existed.
-              variable: "target_site"
-              type: "multiplechoice"
-              choices: "all\nsite_a\nsite_b"
-              default: "all"
-              required: false
-            - question_name: "Share filter (optional)"
-              question_description: >-
-                Limit this run to one share by name (must match a name in
-                shares.yml). Leave blank to run against every share.
-              variable: "share_filter"
-              type: "text"
-              required: false
-        credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
-        state: present
-
+    # ---- Share provisioning templates (extra_vars driven, no shares.yml) ----
+    # All four run playbooks/provision_share.yml - one share per run, every
+    # input from extra_vars (see that playbook's header for the full field
+    # reference). The protocol-specific templates only differ in the
+    # pre-filled skeleton (protocol + which fields are shown).
     - name: Create/update "PowerScale - Provision Share"
       awx.awx.job_template:
         name: "PowerScale - Provision Share"
         description: |-
-          Creates directory, quota, NFS export and/or SMB share as declared in shares.yml.
+          Creates ONE share (directory, optional quota, NFS export and/or SMB share) from extra vars; protocol: nfs, smb or "nfs, smb".
+          Launch: edit the pre-filled extra vars (no Survey). dry_run: true only prints the plan - set false to create. Replace every CHANGE_ME.
+          Lists are comma-separated; empty lists are skipped. NFS: at least one client across nfs_clients / nfs_read_only_clients / nfs_read_write_clients / nfs_root_clients. SMB: at least one "type:name" (user|group|wellknown) across smb_full_control / smb_write / smb_read; use smb_provider_type ads for DOMAIN\name.
+          Optional DR (live runs only): set dr_site (plus dr_target_path, dr_schedule e.g. "every 4 hours", dr_policy_name, dr_rpo_alert_minutes) to also create a SyncIQ policy and mirror the share on the DR cluster.
           Example extra_vars:
-          {"target_site": "site_a", "share_filter": "finance_data"}
-          share_filter: a name in shares.yml (blank = all shares - use a filter on first runs)
+          {"dry_run": false, "primary_site": "site_a", "share_name": "finance_data", "share_path": "/ifs/data/finance", "protocol": "nfs, smb", "quota_gb": 500, "nfs_clients": "10.10.0.0/16", "smb_write": "group:INWI\\finance_team", "smb_read": "wellknown:Everyone", "smb_provider_type": "ads", "dr_site": "site_b", "dr_schedule": "every 4 hours"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
         inventory: "{{ awx_inventory_name }}"
         execution_environment: "{{ ee_name }}"
         job_type: run
-        survey_enabled: true
-        survey_spec:
-          name: ""
-          description: ""
-          spec:
-            - question_name: "Target site"
-              question_description: >-
-                Restrict this run to shares whose primary_site matches.
-                'all' (default) processes every eligible share, same as
-                before this field existed.
-              variable: "target_site"
-              type: "multiplechoice"
-              choices: "all\nsite_a\nsite_b"
-              default: "all"
-              required: false
-            - question_name: "Share filter (optional)"
-              question_description: >-
-                Limit this run to one share by name (must match a name in
-                shares.yml). Leave blank to run against every share. Strongly
-                recommended for the FIRST real run against a new share.
-              variable: "share_filter"
-              type: "text"
-              required: false
+        # No Survey - too many inputs. The launch dialog shows these
+        # extra_vars to edit. Placeholders (CHANGE_ME) fail validation and
+        # dry_run defaults to true, so nothing is created by accident.
+        survey_enabled: false
+        survey_spec: {}
+        ask_variables_on_launch: true
+        extra_vars:
+          dry_run: true
+          primary_site: "site_a"
+          share_name: "CHANGE_ME"
+          share_path: "/ifs/data/CHANGE_ME"
+          protocol: "nfs, smb"
+          access_zone: "System"
+          quota_gb: 0
+          nfs_clients: "CHANGE_ME"
+          nfs_read_only_clients: ""
+          nfs_read_write_clients: ""
+          nfs_root_clients: ""
+          smb_full_control: ""
+          smb_write: ""
+          smb_read: "CHANGE_ME"
+          smb_provider_type: "local"
+          dr_site: ""
+          dr_target_path: ""
+          dr_policy_name: ""
+          dr_schedule: ""
+          dr_rpo_alert_minutes: ""
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
 
-    # ---- Protocol-specific share templates ----
-    # All three point at the SAME playbook (provision_share.yml) - what
-    # makes them behave differently is protocol_filter (see
-    # roles/powerscale_provision_share/tasks/main.yml), which restricts
-    # what gets created THIS RUN even if a share's shares.yml entry
-    # declares more than one protocol. share_filter is REQUIRED here
-    # (unlike the two generic templates above) since these are meant for
-    # one targeted share at a time, not a bulk run.
-    #
-    # synciq_policy_name is captured on all three but NOT YET CONSUMED by
-    # provision_share.yml - Phase 1 doesn't touch SyncIQ at all. It's
-    # collected here so operators get in the habit of naming the policy at
-    # request time, ready to hand to the "SyncIQ Config" template below
-    # once Phase 2 is unblocked. Said explicitly in the question text so
-    # this isn't mistaken for something that already works end-to-end.
     - name: Create/update "PowerScale - Provision Share (NFS Only)"
       awx.awx.job_template:
         name: "PowerScale - Provision Share (NFS Only)"
         description: |-
-          Like Provision Share, but creates only the NFS export (+ directory/quota) this run.
+          Creates ONE NFS share (directory, optional quota, NFS export) from extra vars.
+          Launch: edit the pre-filled extra vars (no Survey). dry_run: true only prints the plan - set false to create. Replace every CHANGE_ME.
+          Lists are comma-separated; empty lists are skipped. NFS: at least one client across nfs_clients / nfs_read_only_clients / nfs_read_write_clients / nfs_root_clients. SMB: at least one "type:name" (user|group|wellknown) across smb_full_control / smb_write / smb_read; use smb_provider_type ads for DOMAIN\name.
+          Optional DR (live runs only): set dr_site (plus dr_target_path, dr_schedule e.g. "every 4 hours", dr_policy_name, dr_rpo_alert_minutes) to also create a SyncIQ policy and mirror the share on the DR cluster.
           Example extra_vars:
-          {"target_site": "site_a", "share_filter": "finance_data"}
-          share_filter: required, a name in shares.yml
+          {"dry_run": false, "primary_site": "site_a", "share_name": "finance_nfs", "share_path": "/ifs/data/finance", "protocol": "nfs", "quota_gb": 500, "nfs_clients": "10.10.0.0/16, 10.20.0.5", "nfs_read_only_clients": "10.30.0.0/24", "nfs_root_clients": "10.10.0.10"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
         inventory: "{{ awx_inventory_name }}"
         execution_environment: "{{ ee_name }}"
         job_type: run
+        # No Survey - too many inputs. The launch dialog shows these
+        # extra_vars to edit. Placeholders (CHANGE_ME) fail validation and
+        # dry_run defaults to true, so nothing is created by accident.
+        survey_enabled: false
+        survey_spec: {}
+        ask_variables_on_launch: true
         extra_vars:
-          protocol_filter: nfs
-        survey_enabled: true
-        survey_spec:
-          name: ""
-          description: ""
-          spec:
-            - question_name: "Target site"
-              question_description: >-
-                Must match the share's primary_site. Kept as a safety check
-                even though share_filter below already pins one share -
-                'all' (default) skips this check.
-              variable: "target_site"
-              type: "multiplechoice"
-              choices: "all\nsite_a\nsite_b"
-              default: "all"
-              required: false
-            - question_name: "Share name"
-              question_description: >-
-                Must match a name in shares.yml. Only the NFS export will be
-                created this run, even if the share also declares smb.
-              variable: "share_filter"
-              type: "text"
-              required: true
-            - question_name: "SyncIQ policy name (optional)"
-              question_description: >-
-                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
-                Captured here only so it's on record for when Phase 2
-                (the "SyncIQ Config" template) is unblocked. Leave blank to
-                use the default naming convention (<share name>_replication)
-                later.
-              variable: "synciq_policy_name"
-              type: "text"
-              required: false
+          dry_run: true
+          primary_site: "site_a"
+          share_name: "CHANGE_ME"
+          share_path: "/ifs/data/CHANGE_ME"
+          protocol: "nfs"
+          access_zone: "System"
+          quota_gb: 0
+          nfs_clients: "CHANGE_ME"
+          nfs_read_only_clients: ""
+          nfs_read_write_clients: ""
+          nfs_root_clients: ""
+          dr_site: ""
+          dr_target_path: ""
+          dr_policy_name: ""
+          dr_schedule: ""
+          dr_rpo_alert_minutes: ""
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
@@ -369,50 +326,41 @@
       awx.awx.job_template:
         name: "PowerScale - Provision Share (SMB Only)"
         description: |-
-          Like Provision Share, but creates only the SMB share (+ directory/quota) this run.
+          Creates ONE SMB share (directory, optional quota, SMB share + permissions) from extra vars.
+          Launch: edit the pre-filled extra vars (no Survey). dry_run: true only prints the plan - set false to create. Replace every CHANGE_ME.
+          Lists are comma-separated; empty lists are skipped. NFS: at least one client across nfs_clients / nfs_read_only_clients / nfs_read_write_clients / nfs_root_clients. SMB: at least one "type:name" (user|group|wellknown) across smb_full_control / smb_write / smb_read; use smb_provider_type ads for DOMAIN\name.
+          Optional DR (live runs only): set dr_site (plus dr_target_path, dr_schedule e.g. "every 4 hours", dr_policy_name, dr_rpo_alert_minutes) to also create a SyncIQ policy and mirror the share on the DR cluster.
           Example extra_vars:
-          {"target_site": "site_a", "share_filter": "finance_data"}
-          share_filter: required, a name in shares.yml
+          {"dry_run": false, "primary_site": "site_a", "share_name": "hr_docs", "share_path": "/ifs/data/hr", "protocol": "smb", "quota_gb": 100, "smb_full_control": "group:INWI\\hr_admins", "smb_write": "group:INWI\\hr_team", "smb_read": "wellknown:Everyone", "smb_provider_type": "ads"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
         inventory: "{{ awx_inventory_name }}"
         execution_environment: "{{ ee_name }}"
         job_type: run
+        # No Survey - too many inputs. The launch dialog shows these
+        # extra_vars to edit. Placeholders (CHANGE_ME) fail validation and
+        # dry_run defaults to true, so nothing is created by accident.
+        survey_enabled: false
+        survey_spec: {}
+        ask_variables_on_launch: true
         extra_vars:
-          protocol_filter: smb
-        survey_enabled: true
-        survey_spec:
-          name: ""
-          description: ""
-          spec:
-            - question_name: "Target site"
-              question_description: >-
-                Must match the share's primary_site. Kept as a safety check
-                even though share_filter below already pins one share -
-                'all' (default) skips this check.
-              variable: "target_site"
-              type: "multiplechoice"
-              choices: "all\nsite_a\nsite_b"
-              default: "all"
-              required: false
-            - question_name: "Share name"
-              question_description: >-
-                Must match a name in shares.yml. Only the SMB share will be
-                created this run, even if the share also declares nfs.
-              variable: "share_filter"
-              type: "text"
-              required: true
-            - question_name: "SyncIQ policy name (optional)"
-              question_description: >-
-                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
-                Captured here only so it's on record for when Phase 2
-                (the "SyncIQ Config" template) is unblocked. Leave blank to
-                use the default naming convention (<share name>_replication)
-                later.
-              variable: "synciq_policy_name"
-              type: "text"
-              required: false
+          dry_run: true
+          primary_site: "site_a"
+          share_name: "CHANGE_ME"
+          share_path: "/ifs/data/CHANGE_ME"
+          protocol: "smb"
+          access_zone: "System"
+          quota_gb: 0
+          smb_full_control: ""
+          smb_write: ""
+          smb_read: "CHANGE_ME"
+          smb_provider_type: "local"
+          dr_site: ""
+          dr_target_path: ""
+          dr_policy_name: ""
+          dr_schedule: ""
+          dr_rpo_alert_minutes: ""
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
@@ -421,110 +369,45 @@
       awx.awx.job_template:
         name: "PowerScale - Provision Share (Mixed NFS+SMB)"
         description: |-
-          Creates both the NFS export and the SMB share (+ directory/quota) for one shares.yml entry.
+          Creates ONE mixed share (directory, optional quota, NFS export AND SMB share) from extra vars.
+          Launch: edit the pre-filled extra vars (no Survey). dry_run: true only prints the plan - set false to create. Replace every CHANGE_ME.
+          Lists are comma-separated; empty lists are skipped. NFS: at least one client across nfs_clients / nfs_read_only_clients / nfs_read_write_clients / nfs_root_clients. SMB: at least one "type:name" (user|group|wellknown) across smb_full_control / smb_write / smb_read; use smb_provider_type ads for DOMAIN\name.
+          Optional DR (live runs only): set dr_site (plus dr_target_path, dr_schedule e.g. "every 4 hours", dr_policy_name, dr_rpo_alert_minutes) to also create a SyncIQ policy and mirror the share on the DR cluster.
           Example extra_vars:
-          {"target_site": "site_a", "share_filter": "finance_data"}
-          share_filter: required, a name in shares.yml with protocol: [nfs, smb]
+          {"dry_run": false, "primary_site": "site_a", "share_name": "finance_data", "share_path": "/ifs/data/finance", "protocol": "nfs, smb", "quota_gb": 500, "nfs_clients": "10.10.0.0/16", "smb_write": "group:INWI\\finance_team", "smb_read": "wellknown:Everyone", "smb_provider_type": "ads", "dr_site": "site_b", "dr_schedule": "every 4 hours"}
         organization: "{{ awx_organization }}"
         project: "{{ awx_project_name }}"
         playbook: "playbooks/provision_share.yml"
         inventory: "{{ awx_inventory_name }}"
         execution_environment: "{{ ee_name }}"
         job_type: run
+        # No Survey - too many inputs. The launch dialog shows these
+        # extra_vars to edit. Placeholders (CHANGE_ME) fail validation and
+        # dry_run defaults to true, so nothing is created by accident.
+        survey_enabled: false
+        survey_spec: {}
+        ask_variables_on_launch: true
         extra_vars:
-          protocol_filter: mixed
-        survey_enabled: true
-        survey_spec:
-          name: ""
-          description: ""
-          spec:
-            - question_name: "Target site"
-              question_description: >-
-                Must match the share's primary_site. Kept as a safety check
-                even though share_filter below already pins one share -
-                'all' (default) skips this check.
-              variable: "target_site"
-              type: "multiplechoice"
-              choices: "all\nsite_a\nsite_b"
-              default: "all"
-              required: false
-            - question_name: "Share name"
-              question_description: >-
-                Must match a name in shares.yml. Creates whatever the share
-                declares in shares.yml (expected: both nfs and smb - if the
-                share only declares one, only that one is created, same as
-                the generic template).
-              variable: "share_filter"
-              type: "text"
-              required: true
-            - question_name: "SyncIQ policy name (optional)"
-              question_description: >-
-                NOT YET FUNCTIONAL - Phase 1 does not create SyncIQ policies.
-                Captured here only so it's on record for when Phase 2
-                (the "SyncIQ Config" template) is unblocked. Leave blank to
-                use the default naming convention (<share name>_replication)
-                later.
-              variable: "synciq_policy_name"
-              type: "text"
-              required: false
-        credentials: >-
-          {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
-        state: present
-
-    # ---- Phase 2: SyncIQ policy config ----
-    # Points at provision_replication.yml, still a SKELETON (see
-    # roles/powerscale_provision_replication/README.md) - launching this
-    # today prints a plan and creates nothing real. synciq_policy_name IS
-    # genuinely wired into the skeleton's naming logic (overrides the
-    # default <share name>_replication convention), unlike the three
-    # templates above where it's inert - see that role's tasks/main.yml.
-    - name: Create/update "PowerScale - Provision Replication (SyncIQ Config)"
-      awx.awx.job_template:
-        name: "PowerScale - Provision Replication (SyncIQ Config)"
-        description: |-
-          SKELETON - prints the planned SyncIQ policy from shares.yml, creates nothing. Use "Setup Share Replication" for a real policy.
-          Example extra_vars:
-          {"target_site": "site_a", "share_filter": "finance_data", "synciq_policy_name": "finance_data_replication"}
-        organization: "{{ awx_organization }}"
-        project: "{{ awx_project_name }}"
-        playbook: "playbooks/provision_replication.yml"
-        inventory: "{{ awx_inventory_name }}"
-        execution_environment: "{{ ee_name }}"
-        job_type: run
-        survey_enabled: true
-        survey_spec:
-          name: ""
-          description: ""
-          spec:
-            - question_name: "Target site"
-              question_description: >-
-                Must match the share's primary_site (the replication
-                SOURCE - not replication.target_site, which is resolved
-                separately). Kept as a safety check even though share_filter
-                below already pins one share - 'all' (default) skips this
-                check.
-              variable: "target_site"
-              type: "multiplechoice"
-              choices: "all\nsite_a\nsite_b"
-              default: "all"
-              required: false
-            - question_name: "Share name"
-              question_description: >-
-                Must match a name in shares.yml. Its replication.target_site
-                / schedule / rpo_alert_minutes fields drive the policy plan.
-              variable: "share_filter"
-              type: "text"
-              required: true
-            - question_name: "SyncIQ policy name (optional)"
-              question_description: >-
-                Overrides the default naming convention
-                (<share name>_replication). This DOES take effect in the
-                skeleton's planned output today, even though the real
-                synciqpolicy task itself stays commented out until the 5
-                open questions in the role are resolved.
-              variable: "synciq_policy_name"
-              type: "text"
-              required: false
+          dry_run: true
+          primary_site: "site_a"
+          share_name: "CHANGE_ME"
+          share_path: "/ifs/data/CHANGE_ME"
+          protocol: "nfs, smb"
+          access_zone: "System"
+          quota_gb: 0
+          nfs_clients: "CHANGE_ME"
+          nfs_read_only_clients: ""
+          nfs_read_write_clients: ""
+          nfs_root_clients: ""
+          smb_full_control: ""
+          smb_write: ""
+          smb_read: "CHANGE_ME"
+          smb_provider_type: "local"
+          dr_site: ""
+          dr_target_path: ""
+          dr_policy_name: ""
+          dr_schedule: ""
+          dr_rpo_alert_minutes: ""
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
@@ -768,7 +651,7 @@
       awx.awx.job_template:
         name: "PowerScale - Setup Share Replication"
         description: |-
-          Creates a real SyncIQ policy for an EXISTING share and mirrors export/share/quota onto the target (only if missing). The target path's parent directory must exist.
+          Creates a real SyncIQ policy for an EXISTING share and mirrors export/share/quota onto the target (only if missing).
           Example extra_vars (NFS only):
           {"source_site": "site_a", "target_site": "site_b", "share_path": "/ifs/data/finance", "schedule": "every 4 hours"}
           Example extra_vars (SMB only - path taken from the share):

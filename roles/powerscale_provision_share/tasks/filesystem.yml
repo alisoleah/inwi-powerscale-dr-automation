@@ -32,7 +32,7 @@
     # owner is REQUIRED by this module when creating a Filesystem (found via
     # a real run - never actually created a real filesystem before this).
     # Defaults to root, same pattern as access_zone's default - override per-
-    # share via shares.yml's optional owner/owner_provider_type fields if a
+    # share via the optional `owner` extra_var (provision_share.yml) if a
     # share needs different ownership.
     #
     # provider_type defaults to "file", NOT this module's own doc-listed

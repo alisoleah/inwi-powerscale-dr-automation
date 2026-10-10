@@ -1,62 +1,255 @@
 ---
-- name: Provision NFS/SMB shares on PowerScale (Phase 1)
+# Provision ONE NFS / SMB / mixed share on PowerScale, fully from
+# extra_vars - no shares.yml. Connection details still come from
+# sites.yml + the attached AWX Site A / Site B Credentials.
+#
+# Used by the AWX templates "PowerScale - Provision Share", "(NFS Only)",
+# "(SMB Only)" and "(Mixed NFS+SMB)". They have no Survey: the launch
+# dialog shows a pre-filled extra_vars skeleton to edit. Placeholders are
+# CHANGE_ME and dry_run defaults to true, so a forgotten field fails
+# validation and nothing is created until you set dry_run: false.
+#
+# Lists are comma-separated strings. Empty lists are skipped.
+#
+# Required:
+#   primary_site   site_a | site_b - the cluster to create the share on
+#   share_name     share label; also the SMB share name
+#   share_path     e.g. /ifs/data/finance (must start with /ifs/)
+#   protocol       "nfs" | "smb" | "nfs, smb"
+#   NFS (protocol includes nfs) - at least ONE client across these four:
+#     nfs_clients, nfs_read_only_clients, nfs_read_write_clients,
+#     nfs_root_clients        e.g. "10.10.0.0/16, 10.20.0.5, host1.inwi.lan"
+#   SMB (protocol includes smb) - at least ONE trustee across these three,
+#   each entry "type:name", type = user | group | wellknown:
+#     smb_full_control, smb_write, smb_read
+#                             e.g. "group:INWI\\finance_team, user:INWI\\bob"
+#                                  "wellknown:Everyone"
+# Optional:
+#   dry_run            true (default) = print the plan only; false = create
+#   access_zone        default System
+#   quota_gb           hard limit in GB; 0 / empty = no quota
+#   owner              directory owner (default root)
+#   smb_provider_type  local (default) | ads | ldap | nis | file - used to
+#                      resolve user/group trustees (use ads for DOMAIN\name)
+#   DR (optional - only when dr_site is set, and only when dry_run is false):
+#     dr_site               site_a | site_b, must differ from primary_site
+#     dr_target_path        default: same as share_path (created on the DR
+#                           cluster if missing)
+#     dr_policy_name        default: <last path component>_replication
+#     dr_schedule           OneFS format, e.g. "every 4 hours"; empty = manual
+#     dr_rpo_alert_minutes  positive integer
+#   After creating the share, runs setup_share_replication.yml with these
+#   values (SyncIQ policy + mirrored export/share/quota on dr_site).
+#
+# NOTE: uses primary_site / dr_site, NOT target_site - setup_share_replication
+# uses target_site for the DR cluster, so target_site must not be passed here.
+#
+# Example (mixed share, dry run first):
+#   {
+#     "dry_run": true,
+#     "primary_site": "site_a",
+#     "share_name": "finance_data",
+#     "share_path": "/ifs/data/finance",
+#     "protocol": "nfs, smb",
+#     "quota_gb": 500,
+#     "nfs_clients": "10.10.0.0/16",
+#     "nfs_read_only_clients": "10.30.0.0/24",
+#     "nfs_read_write_clients": "",
+#     "nfs_root_clients": "",
+#     "smb_full_control": "",
+#     "smb_write": "group:INWI\\finance_team",
+#     "smb_read": "wellknown:Everyone",
+#     "smb_provider_type": "ads",
+#     "dr_site": "site_b",
+#     "dr_schedule": "every 4 hours"
+#   }
+
+- name: Provision one NFS/SMB share on PowerScale (extra_vars driven)
   hosts: localhost
   connection: local
   gather_facts: false
   vars_files:
     - ../group_vars/all/sites.yml
-    - ../group_vars/all/shares.yml
 
   pre_tasks:
     - name: Overlay AWX-injected site credentials, if present
       ansible.builtin.import_role:
         name: awx_credential_overlay
 
-    - name: Validate input before touching any cluster
-      ansible.builtin.import_role:
-        name: validate_input
-
-    - name: If share_filter is set, confirm it matches a real share
+    - name: Reject target_site (this playbook uses primary_site / dr_site)
       ansible.builtin.assert:
         that:
-          - share_filter in (shares | map(attribute='name') | list)
+          - target_site is not defined
         fail_msg: >-
-          share_filter='{{ share_filter }}' does not match any share name in
-          shares.yml - check for a typo. Known share names:
-          {{ shares | map(attribute='name') | list | join(', ') }}
-      when: share_filter is defined
+          Use primary_site (where to create the share) and, optionally,
+          dr_site (replication target) - not target_site.
 
-    - name: If share_filter is set, confirm its share's primary_site is active
-      ansible.builtin.assert:
-        that:
-          - (shares | selectattr('name', 'equalto', share_filter) | first).primary_site in active_sites
-        fail_msg: >-
-          share_filter='{{ share_filter }}' has primary_site
-          '{{ (shares | selectattr('name', 'equalto', share_filter) | first).primary_site }}',
-          which isn't active - target_site is currently
-          '{{ target_site }}'. Either drop target_site (or set it to the
-          matching site), or pick a share whose primary_site is active.
-      when: share_filter is defined and target_site != 'all'
-
-    # Filtered by active_sites (target_site, default 'all' - see
-    # roles/validate_input) first, then narrowed further to one share via
-    # share_filter if set. A share whose primary_site isn't active is
-    # silently skipped here (not an error) UNLESS share_filter explicitly
-    # named it, which the assert above already catches.
-    - name: Resolve active_shares (active_sites' shares, or just share_filter's)
+    - name: Resolve protocol, dry_run and CSV lists
       ansible.builtin.set_fact:
-        active_shares: >-
-          {{ shares
-             | selectattr('primary_site', 'in', active_sites.keys() | list)
-             | list }}
+        _dry_run: "{{ dry_run | default(true) | bool }}"
+        _protocols: >-
+          {{ (protocol | default('') | string).split(',') | map('trim') | map('lower')
+             | reject('equalto', '') | unique | list }}
+        _quota_gb: "{{ quota_gb | default(0, true) | int }}"
+        _nfs_clients: "{{ (nfs_clients | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _nfs_ro: "{{ (nfs_read_only_clients | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _nfs_rw: "{{ (nfs_read_write_clients | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _nfs_root: "{{ (nfs_root_clients | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _dr_site: "{{ dr_site | default('') | string | trim }}"
+
+    - name: Validate the share definition
+      ansible.builtin.assert:
+        that:
+          - primary_site is defined
+          - primary_site in sites
+          - share_name is defined
+          - share_name | string | trim | length > 0
+          - "'CHANGE_ME' not in (share_name | string)"
+          - share_path is defined
+          - share_path is match('^/ifs/')
+          - "'CHANGE_ME' not in share_path"
+          - _protocols | length > 0
+          - _protocols | difference(['nfs', 'smb']) | length == 0
+          - _quota_gb | int >= 0
+        fail_msg: >-
+          Invalid input. Need: primary_site ({{ sites.keys() | join(' | ') }}),
+          share_name and share_path (no CHANGE_ME placeholders, path under
+          /ifs/), protocol "nfs", "smb" or "nfs, smb", quota_gb >= 0.
+          Got primary_site={{ primary_site | default('(missing)') }},
+          share_name={{ share_name | default('(missing)') }},
+          share_path={{ share_path | default('(missing)') }},
+          protocol={{ protocol | default('(missing)') }}.
+
+    - name: Validate NFS client lists (protocol includes nfs)
+      ansible.builtin.assert:
+        that:
+          - (_nfs_clients + _nfs_ro + _nfs_rw + _nfs_root) | length > 0
+          - (_nfs_clients + _nfs_ro + _nfs_rw + _nfs_root) | select('search', 'CHANGE_ME') | list | length == 0
+          - (_nfs_clients + _nfs_ro + _nfs_rw + _nfs_root) | reject('match', '^[A-Za-z0-9.:/_*@-]+$') | list | length == 0
+        fail_msg: >-
+          NFS needs at least one client in nfs_clients, nfs_read_only_clients,
+          nfs_read_write_clients or nfs_root_clients (comma-separated IPs,
+          CIDRs or hostnames, no CHANGE_ME). Invalid entries:
+          {{ (_nfs_clients + _nfs_ro + _nfs_rw + _nfs_root) | reject('match', '^[A-Za-z0-9.:/_*@-]+$') | list
+             + ((_nfs_clients + _nfs_ro + _nfs_rw + _nfs_root) | select('search', 'CHANGE_ME') | list) }}
+      when: "'nfs' in _protocols"
+
+    # One var per permission level, each "type:name, type:name". Parsed into
+    # the dellemc.powerscale.smb INPUT shape. Malformed entries are collected
+    # and reported instead of silently dropped.
+    - name: Parse SMB permission lists (protocol includes smb)
+      ansible.builtin.set_fact:
+        _smb_parsed_json: |-
+          {%- set ns = namespace(perms=[], labels=[], bad=[]) -%}
+          {%- set keys = {'user': 'user_name', 'group': 'group_name', 'wellknown': 'wellknown'} -%}
+          {%- for level, raw in [('full', smb_full_control | default('')), ('write', smb_write | default('')), ('read', smb_read | default(''))] -%}
+            {%- for entry in (raw | string).split(',') | map('trim') | reject('equalto', '') -%}
+              {%- set parts = entry.split(':', 1) -%}
+              {%- if parts | length != 2 or (parts[0] | trim | lower) not in keys or (parts[1] | trim) == '' or 'CHANGE_ME' in entry -%}
+                {%- set ns.bad = ns.bad + [entry] -%}
+              {%- else -%}
+                {%- set ttype = parts[0] | trim | lower -%}
+                {%- set tname = parts[1] | trim -%}
+                {%- set item = {keys[ttype]: tname, 'permission': level, 'permission_type': 'allow'} -%}
+                {%- if ttype != 'wellknown' -%}
+                  {%- set item = item | combine({'provider_type': smb_provider_type | default('local')}) -%}
+                {%- endif -%}
+                {%- set ns.perms = ns.perms + [item] -%}
+                {%- set ns.labels = ns.labels + [ttype ~ ':' ~ tname ~ '=' ~ level] -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ {'perms': ns.perms, 'labels': ns.labels, 'bad': ns.bad} | to_json }}
+      when: "'smb' in _protocols"
+
+    - name: Validate SMB permissions (protocol includes smb)
+      ansible.builtin.assert:
+        that:
+          - (_smb_parsed_json | from_json).bad | length == 0
+          - (_smb_parsed_json | from_json).perms | length > 0
+          - (smb_provider_type | default('local')) in ['local', 'file', 'ads', 'ldap', 'nis']
+        fail_msg: >-
+          SMB needs at least one trustee in smb_full_control, smb_write or
+          smb_read, each entry "type:name" with type user | group | wellknown
+          (e.g. "group:INWI\\finance_team, wellknown:Everyone"), no CHANGE_ME;
+          smb_provider_type one of local, file, ads, ldap, nis.
+          Invalid entries: {{ (_smb_parsed_json | from_json).bad }}
+      when: "'smb' in _protocols"
+
+    - name: Validate DR settings (only when dr_site is set)
+      ansible.builtin.assert:
+        that:
+          - _dr_site in sites
+          - _dr_site != primary_site
+          - (dr_rpo_alert_minutes | default('') | string | length == 0) or (dr_rpo_alert_minutes | int > 0)
+        fail_msg: >-
+          dr_site must be one of {{ sites.keys() | join(', ') }} and differ
+          from primary_site ({{ primary_site }}); dr_rpo_alert_minutes, if
+          set, must be a positive integer.
+      when: _dr_site | length > 0
+
+    - name: Fail fast if the site still has CHANGE_ME / missing fields
+      ansible.builtin.assert:
+        that:
+          - sites[primary_site].onefs_host | default('') | length > 0
+          - sites[primary_site].onefs_host != "CHANGE_ME"
+          - sites[primary_site].api_user | default('') | length > 0
+          - sites[primary_site].api_password | default('') | length > 0
+          - sites[primary_site].api_password != "CHANGE_ME"
+        fail_msg: >-
+          Site '{{ primary_site }}' is missing connection fields or still has a
+          CHANGE_ME placeholder - check sites.yml / the attached AWX Credential.
+      no_log: true
 
   tasks:
-    - name: Provision each share
+    - name: Build the share definition
+      ansible.builtin.set_fact:
+        _share: >-
+          {{ {
+               'name': share_name | string | trim,
+               'path': share_path | regex_replace('/+$', ''),
+               'access_zone': access_zone | default('System', true),
+               'protocol': _protocols,
+               'owner': owner | default('root', true),
+               'nfs_clients': _nfs_clients,
+               'nfs_read_only_clients': _nfs_ro,
+               'nfs_read_write_clients': _nfs_rw,
+               'nfs_root_clients': _nfs_root,
+               'smb_permissions': (_smb_parsed_json | from_json).perms if 'smb' in _protocols else [],
+               'smb_permission_labels': (_smb_parsed_json | from_json).labels if 'smb' in _protocols else []
+             } | combine({'quota_gb': _quota_gb | int} if (_quota_gb | int) > 0 else {}) }}
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg:
+          - "{{ 'DRY RUN - nothing will be changed. Set dry_run: false to create.' if _dry_run | bool else 'LIVE RUN - changes will be made.' }}"
+          - "Share '{{ _share.name }}' ({{ _protocols | join(' + ') | upper }}) at {{ _share.path }} on {{ primary_site }} ({{ sites[primary_site].onefs_host }})"
+          - "{{ ('DR: replicate to ' ~ _dr_site ~ ' (' ~ sites[_dr_site].onefs_host ~ ') at ' ~ (dr_target_path | default(_share.path, true))
+                 ~ ', schedule: ' ~ (dr_schedule | default('manual', true))
+                 ~ (' - skipped in dry run' if _dry_run | bool else ''))
+                if _dr_site | length > 0 else 'DR: none (dr_site not set)' }}"
+
+    - name: Provision the share
       ansible.builtin.include_role:
         name: powerscale_provision_share
       vars:
-        share: "{{ item }}"
-        site: "{{ sites[item.primary_site] }}"
-      loop: "{{ active_shares | selectattr('name', 'equalto', share_filter) | list if share_filter is defined else active_shares }}"
-      loop_control:
-        label: "{{ item.name }}"
+        share: "{{ _share }}"
+        site: "{{ sites[primary_site] }}"
+        share_dry_run: "{{ _dry_run }}"
+
+# Optional DR step: reuses setup_share_replication.yml as-is. Only runs when
+# dr_site is set and this is not a dry run. Empty strings for its optional
+# inputs mean "not given" (that playbook normalises them).
+- name: Optional - set up DR replication for the new share
+  ansible.builtin.import_playbook: setup_share_replication.yml
+  vars:
+    source_site: "{{ primary_site }}"
+    target_site: "{{ dr_site }}"
+    smb_share_name: "{{ (share_name | string | trim) if 'smb' in hostvars['localhost']['_protocols'] else '' }}"
+    target_path: "{{ dr_target_path | default('') }}"
+    policy_name: "{{ dr_policy_name | default('') }}"
+    schedule: "{{ dr_schedule | default('') }}"
+    rpo_alert_minutes: "{{ dr_rpo_alert_minutes | default('') }}"
+  when:
+    - hostvars['localhost']['_dr_site'] | default('') | length > 0
+    - not (hostvars['localhost']['_dry_run'] | default(true) | bool)

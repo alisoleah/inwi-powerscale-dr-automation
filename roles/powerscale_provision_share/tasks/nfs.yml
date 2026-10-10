@@ -21,6 +21,8 @@
     access_zone: "{{ share.access_zone | default('System') }}"
     clients: "{{ share.nfs_clients | default([]) }}"
     read_only_clients: "{{ share.nfs_read_only_clients | default([]) }}"
+    read_write_clients: "{{ share.nfs_read_write_clients | default([]) }}"
+    root_clients: "{{ share.nfs_root_clients | default([]) }}"
     client_state: "present-in-export"
     state: present
   register: nfs_result

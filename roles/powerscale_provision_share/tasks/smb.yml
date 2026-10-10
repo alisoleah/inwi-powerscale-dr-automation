@@ -5,7 +5,12 @@
 # cluster), but produces no meaningful diff. Use share_dry_run=true (see
 # main.yml) for a reliable plan instead of relying on --check for SMB.
 
-- name: "[{{ share.name }}] Create/ensure SMB share"
+# Permissions are passed in the SAME call that creates the share: on
+# create the module applies exactly this list (no default "Everyone read"
+# entry left behind). If the share already exists, the module MERGES the
+# list into the existing entries (adds/updates, never removes) - use the
+# "Manage SMB Permission" template to revoke.
+- name: "[{{ share.name }}] Create/ensure SMB share with permissions"
   dellemc.powerscale.smb:
     onefs_host: "{{ site.onefs_host }}"
     port_no: "{{ site.port_no | default(8080) }}"
@@ -15,64 +20,12 @@
     share_name: "{{ share.name }}"
     path: "{{ share.path }}"
     access_zone: "{{ share.access_zone | default('System') }}"
+    permissions: "{{ share.smb_permissions }}"
     state: present
   register: smb_result
 
 - name: "[{{ share.name }}] SMB share result"
   ansible.builtin.debug:
     msg: >-
-      SMB share '{{ share.name }}':
+      SMB share '{{ share.name }}' ({{ share.smb_permission_labels | join(', ') }}):
       {{ 'created/modified' if smb_result.changed else 'already present, no change' }}
-
-# Build the permissions list explicitly per entry rather than using
-# `default(omit)` inside a nested list-of-dicts. `omit` is only reliable as
-# the direct value of a top-level module parameter - nested inside a list
-# passed as a parameter value, the unresolved sentinel can reach the module
-# and be treated as a literal string instead of being stripped. Constructing
-# two distinct dict shapes here (one with user_name, one with group_name)
-# avoids the sentinel ever being needed.
-#
-# CONFIRMED BUG (fixed here): this task is reached once per share, via
-# provision_share.yml's `include_role` loop over shares.yml. `set_fact`
-# facts persist for the rest of the WHOLE PLAY, not just this task's
-# include - so without an explicit reset, share 2 would start its
-# accumulation from share 1's leftover list instead of an empty one,
-# silently granting share 2 share 1's permission entries too. Reproduced
-# and confirmed with a standalone two-share test before fixing.
-- name: "[{{ share.name }}] Reset SMB permissions accumulator for this share"
-  ansible.builtin.set_fact:
-    _smb_permissions: []
-
-- name: "[{{ share.name }}] Build SMB permissions list"
-  ansible.builtin.set_fact:
-    _smb_permissions: "{{ (_smb_permissions | default([])) + [ (
-        {'user_name': item.user, 'permission': item.permission, 'permission_type': 'allow'}
-        if item.user is defined
-        else {'group_name': item.group, 'permission': item.permission, 'permission_type': 'allow'}
-      ) ] }}"
-  loop: "{{ share.smb_permissions | default([]) }}"
-  loop_control:
-    label: "{{ item.user | default(item.group | default('(unknown)')) }}"
-
-# Applied as a single call with the full permissions list, matching this
-# module's declarative state:present semantics, rather than one API call
-# per permission entry.
-- name: "[{{ share.name }}] Apply SMB permissions"
-  dellemc.powerscale.smb:
-    onefs_host: "{{ site.onefs_host }}"
-    port_no: "{{ site.port_no | default(8080) }}"
-    verify_ssl: "{{ site.verify_ssl | default(false) }}"
-    api_user: "{{ site.api_user }}"
-    api_password: "{{ site.api_password }}"
-    share_name: "{{ share.name }}"
-    permissions: "{{ _smb_permissions | default([]) }}"
-    state: present
-  when: (share.smb_permissions | default([])) | length > 0
-  register: smb_perm_result
-
-- name: "[{{ share.name }}] SMB permissions result"
-  ansible.builtin.debug:
-    msg: >-
-      SMB permissions for '{{ share.name }}':
-      {{ 'created/modified' if smb_perm_result.changed | default(false) else 'already present, no change' }}
-  when: (share.smb_permissions | default([])) | length > 0

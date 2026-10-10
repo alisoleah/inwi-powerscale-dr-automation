@@ -129,14 +129,23 @@
       ansible.builtin.set_fact:
         source_site_obj: "{{ sites[source_site] }}"
         target_site_obj: "{{ sites[target_site] }}"
-        action: "{{ action | default('sync') }}"
-        state: "{{ state | default('present') }}"
+        # Internal, normalised copies of the optional inputs. Empty strings /
+        # 0 mean "not given" (AWX can send blank answers, and
+        # provision_share.yml passes "" for unused DR fields). Separate
+        # _names because set_fact cannot override a value passed as an
+        # extra var.
+        _action: "{{ action | default('sync', true) }}"
+        _state: "{{ state | default('present', true) }}"
+        _smb_given: "{{ smb_share_name | default('') | string | trim | length > 0 }}"
+        _quota_given: "{{ (quota_gb | default(0, true) | int) > 0 }}"
+        _schedule_given: "{{ schedule | default('') | string | trim | length > 0 }}"
+        _rpo_given: "{{ rpo_alert_minutes | default('') | string | trim | length > 0 }}"
 
     - name: Validate action/state
       ansible.builtin.assert:
         that:
-          - action in ['sync', 'copy']
-          - state in ['present', 'absent']
+          - _action in ['sync', 'copy']
+          - _state in ['present', 'absent']
         fail_msg: "action must be sync|copy, state must be present|absent."
 
     - name: Fail fast if either site still has CHANGE_ME / missing fields
@@ -173,7 +182,7 @@
       register: source_smb
       ignore_errors: true
       no_log: true
-      when: smb_share_name is defined
+      when: (_smb_given | bool)
 
     - name: Fail fast if smb_share_name was given but doesn't exist on source
       ansible.builtin.fail:
@@ -181,38 +190,40 @@
           smb_share_name='{{ smb_share_name }}' was given but no such SMB
           share exists on {{ source_site_obj.onefs_host }}.
       when: >-
-        smb_share_name is defined and
+        (_smb_given | bool) and
         (source_smb is failed or source_smb.smb_details.shares | default([]) | length == 0)
 
-    - name: Take share_path from the SMB share if not given (SMB-only)
+    - name: Resolve share_path (from the SMB share when not given - SMB-only)
       ansible.builtin.set_fact:
-        share_path: "{{ source_smb.smb_details.shares[0].path }}"
-      when: share_path | default('') | length == 0
+        _share_path: >-
+          {{ (share_path | string | trim)
+             if (share_path | default('') | string | trim | length > 0)
+             else source_smb.smb_details.shares[0].path }}
 
     - name: Fail fast if share_path and the SMB share's path disagree (mixed)
       ansible.builtin.fail:
         msg: >-
-          share_path '{{ share_path }}' does not match SMB share
+          share_path '{{ _share_path }}' does not match SMB share
           '{{ smb_share_name }}' path '{{ source_smb.smb_details.shares[0].path }}'
           on {{ source_site_obj.onefs_host }} - for a mixed share both must
           point at the same directory.
       when: >-
-        smb_share_name is defined and
-        (share_path | regex_replace('/+$', '')) != (source_smb.smb_details.shares[0].path | regex_replace('/+$', ''))
+        (_smb_given | bool) and
+        (_share_path | regex_replace('/+$', '')) != (source_smb.smb_details.shares[0].path | regex_replace('/+$', ''))
 
     - name: Resolve target_path and policy_name
       ansible.builtin.set_fact:
-        target_path: "{{ target_path | default(share_path) }}"
-        policy_name: "{{ policy_name | default((share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
+        _target_path: "{{ target_path | default(_share_path, true) }}"
+        _policy_name: "{{ policy_name | default((_share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication', true) }}"
 
-    - name: "[source] Capture current NFS export at {{ share_path }}"
+    - name: "[source] Capture current NFS export at {{ _share_path }}"
       dellemc.powerscale.nfs:
         onefs_host: "{{ source_site_obj.onefs_host }}"
         port_no: "{{ source_site_obj.port_no | default(8080) }}"
         verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ source_site_obj.api_user }}"
         api_password: "{{ source_site_obj.api_password }}"
-        path: "{{ share_path }}"
+        path: "{{ _share_path }}"
         state: "present"
       check_mode: true
       register: source_nfs
@@ -224,12 +235,12 @@
     - name: Resolve which protocols the source share has
       ansible.builtin.set_fact:
         _source_has_nfs: "{{ source_nfs.NFS_export_details | default({}, true) | length > 0 }}"
-        _source_has_smb: "{{ smb_share_name is defined }}"
+        _source_has_smb: "{{ (_smb_given | bool) }}"
 
     - name: Fail fast if there's nothing to replicate at this path
       ansible.builtin.fail:
         msg: >-
-          No NFS export found at '{{ share_path }}' on
+          No NFS export found at '{{ _share_path }}' on
           {{ source_site_obj.onefs_host }} and no smb_share_name given
           (this playbook mirrors an EXISTING share's DR setup, it does not
           create brand-new shares - use provision_share.yml for that). For
@@ -239,7 +250,7 @@
     - name: "[source] Protocols to mirror"
       ansible.builtin.debug:
         msg: >-
-          {{ share_path }}: {{ 'mixed NFS + SMB' if (_source_has_nfs | bool and _source_has_smb | bool)
+          {{ _share_path }}: {{ 'mixed NFS + SMB' if (_source_has_nfs | bool and _source_has_smb | bool)
              else 'NFS only' if (_source_has_nfs | bool) else 'SMB only' }}.
 
     - name: Convert source SMB permissions to module INPUT shape (for mirroring)
@@ -256,20 +267,20 @@
         loop_var: perm_item
         label: "{{ perm_item.trustee.name }}"
 
-    - name: "[source] Capture current quota at {{ share_path }}"
+    - name: "[source] Capture current quota at {{ _share_path }}"
       dellemc.powerscale.smartquota:
         onefs_host: "{{ source_site_obj.onefs_host }}"
         port_no: "{{ source_site_obj.port_no | default(8080) }}"
         verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ source_site_obj.api_user }}"
         api_password: "{{ source_site_obj.api_password }}"
-        path: "{{ share_path }}"
+        path: "{{ _share_path }}"
         quota_type: "directory"
         state: "present"
       check_mode: true
       register: source_quota
       no_log: true
-      when: quota_gb is defined
+      when: (_quota_given | bool)
 
     - name: Resolve access_zone from the source export
       ansible.builtin.set_fact:
@@ -278,7 +289,9 @@
     # ---- 2. Resolve the SyncIQ source network (optional) ----
     - name: Resolve network_pool/network_subnet if both already given
       ansible.builtin.set_fact:
-        _network_resolved: "{{ ((network_pool is defined) and (network_subnet is defined)) | bool }}"
+        _network_resolved: "{{ (network_pool | default('') | string | length > 0) and (network_subnet | default('') | string | length > 0) }}"
+        _network_pool: "{{ network_pool | default('') }}"
+        _network_subnet: "{{ network_subnet | default('') }}"
 
     - name: Auto-detect the source cluster's network pools, if not given
       dellemc.powerscale.info:
@@ -295,8 +308,8 @@
 
     - name: Auto-select the pool if exactly one is configured
       ansible.builtin.set_fact:
-        network_pool: "{{ source_pools.NetworkPools[0].name }}"
-        network_subnet: "{{ source_pools.NetworkPools[0].id.split('.')[1] }}"
+        _network_pool: "{{ source_pools.NetworkPools[0].name }}"
+        _network_subnet: "{{ source_pools.NetworkPools[0].id.split('.')[1] }}"
         _network_resolved: true
       when: >-
         not (_network_resolved | bool) and
@@ -305,7 +318,7 @@
     - name: Report network pool resolution
       ansible.builtin.debug:
         msg: >-
-          {{ 'Using network_pool=' ~ network_pool ~ ', network_subnet=' ~ network_subnet ~ '.'
+          {{ 'Using network_pool=' ~ _network_pool ~ ', network_subnet=' ~ _network_subnet ~ '.'
              if (_network_resolved | bool)
              else 'No single network pool auto-detected on ' ~ source_site_obj.onefs_host ~
                   ' (' ~ (source_pools.NetworkPools | default([]) | length) ~ ' found) - ' ~
@@ -319,7 +332,7 @@
         verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ target_site_obj.api_user }}"
         api_password: "{{ target_site_obj.api_password }}"
-        path: "{{ target_path }}"
+        path: "{{ _target_path }}"
         access_zone: "{{ access_zone }}"
         state: "present"
       check_mode: true
@@ -339,7 +352,7 @@
       register: target_smb
       ignore_errors: true
       no_log: true
-      when: smb_share_name is defined
+      when: (_smb_given | bool)
 
     - name: "[target] Check whether a matching quota already exists"
       dellemc.powerscale.smartquota:
@@ -348,14 +361,14 @@
         verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ target_site_obj.api_user }}"
         api_password: "{{ target_site_obj.api_password }}"
-        path: "{{ target_path }}"
+        path: "{{ _target_path }}"
         quota_type: "directory"
         access_zone: "{{ access_zone }}"
         state: "present"
       check_mode: true
       register: target_quota
       no_log: true
-      when: quota_gb is defined
+      when: (_quota_given | bool)
 
     - name: "[policy] Check whether this policy already exists"
       dellemc.powerscale.synciqpolicy:
@@ -364,7 +377,7 @@
         verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ source_site_obj.api_user }}"
         api_password: "{{ source_site_obj.api_password }}"
-        policy_name: "{{ policy_name }}"
+        policy_name: "{{ _policy_name }}"
         state: "present"
       register: policy_before
       ignore_errors: true
@@ -372,6 +385,28 @@
 
     - block:
         # ---- 4. Create missing target objects (never overwrite existing ones) ----
+        # The nfs and smartquota modules cannot create a missing directory,
+        # and on a fresh DR target the directory usually doesn't exist until
+        # the first sync. Create it (owner root) so the export/quota below
+        # can be made. SyncIQ accepts an existing target directory.
+        - name: "[target] Ensure target directory {{ _target_path }} exists"
+          dellemc.powerscale.filesystem:
+            onefs_host: "{{ target_site_obj.onefs_host }}"
+            port_no: "{{ target_site_obj.port_no | default(8080) }}"
+            verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
+            api_user: "{{ target_site_obj.api_user }}"
+            api_password: "{{ target_site_obj.api_password }}"
+            path: "{{ _target_path }}"
+            access_zone: "{{ access_zone }}"
+            recursive: true
+            owner:
+              name: "root"
+              provider_type: "file"
+            state: "present"
+          register: target_dir
+          no_log: true
+          when: _state == 'present'
+
         - name: "[target] Create missing NFS export, mirroring source's clients"
           dellemc.powerscale.nfs:
             onefs_host: "{{ target_site_obj.onefs_host }}"
@@ -379,7 +414,7 @@
             verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
-            path: "{{ target_path }}"
+            path: "{{ _target_path }}"
             access_zone: "{{ access_zone }}"
             clients: "{{ source_nfs.NFS_export_details.clients | default([]) }}"
             read_only_clients: "{{ source_nfs.NFS_export_details.read_only_clients | default([]) }}"
@@ -388,15 +423,15 @@
             state: "present"
           register: target_nfs_created
           no_log: true
-          when: (_source_has_nfs | bool) and (target_nfs.NFS_export_details | default({}, true) | length == 0) and state == 'present'
+          when: (_source_has_nfs | bool) and (target_nfs.NFS_export_details | default({}, true) | length == 0) and _state == 'present'
 
         - name: "[target] Report NFS export status"
           ansible.builtin.debug:
             msg: >-
-              {{ 'Created a new NFS export at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ ', mirroring source clients.'
+              {{ 'Created a new NFS export at ' ~ _target_path ~ ' on ' ~ target_site_obj.onefs_host ~ ', mirroring source clients.'
                  if (target_nfs.NFS_export_details | default({}, true) | length == 0)
-                 else 'Target already has an NFS export at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
-          when: state == 'present' and (_source_has_nfs | bool)
+                 else 'Target already has an NFS export at ' ~ _target_path ~ ' - left as-is (not overwritten).' }}
+          when: _state == 'present' and (_source_has_nfs | bool)
 
         - name: "[target] Create missing SMB share, mirroring source's permissions"
           dellemc.powerscale.smb:
@@ -406,14 +441,14 @@
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
             share_name: "{{ smb_share_name }}"
-            path: "{{ target_path }}"
+            path: "{{ _target_path }}"
             access_zone: "{{ access_zone }}"
             permissions: "{{ _mirror_permissions | default([]) }}"
             state: "present"
           register: target_smb_created
           no_log: true
           when: >-
-            smb_share_name is defined and state == 'present' and
+            (_smb_given | bool) and _state == 'present' and
             (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
 
         - name: "[target] Report SMB share status"
@@ -422,7 +457,7 @@
               {{ "Created a new SMB share '" ~ smb_share_name ~ "' on " ~ target_site_obj.onefs_host ~ ', mirroring source permissions.'
                  if (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
                  else "Target already has an SMB share named '" ~ smb_share_name ~ "' - left as-is (not overwritten)." }}
-          when: smb_share_name is defined and state == 'present'
+          when: (_smb_given | bool) and _state == 'present'
 
         - name: "[target] Create missing quota ({{ quota_gb | default('') }}GB)"
           dellemc.powerscale.smartquota:
@@ -431,7 +466,7 @@
             verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
-            path: "{{ target_path }}"
+            path: "{{ _target_path }}"
             quota_type: "directory"
             access_zone: "{{ access_zone }}"
             quota:
@@ -440,46 +475,46 @@
             state: "present"
           register: target_quota_created
           no_log: true
-          when: quota_gb is defined and state == 'present' and (target_quota.quota_details | default({}, true) | length == 0)
+          when: (_quota_given | bool) and _state == 'present' and (target_quota.quota_details | default({}, true) | length == 0)
 
         - name: "[target] Report quota status"
           ansible.builtin.debug:
             msg: >-
-              {{ 'Created a new ' ~ quota_gb ~ 'GB quota at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ '.'
+              {{ 'Created a new ' ~ quota_gb ~ 'GB quota at ' ~ _target_path ~ ' on ' ~ target_site_obj.onefs_host ~ '.'
                  if (target_quota.quota_details | default({}, true) | length == 0)
-                 else 'Target already has a quota at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
-          when: quota_gb is defined and state == 'present'
+                 else 'Target already has a quota at ' ~ _target_path ~ ' - left as-is (not overwritten).' }}
+          when: (_quota_given | bool) and _state == 'present'
 
         # ---- 5. Create/remove the SyncIQ policy itself ----
-        - name: "[policy] {{ 'Create/ensure' if state == 'present' else 'Delete' }} '{{ policy_name }}'"
+        - name: "[policy] {{ 'Create/ensure' if _state == 'present' else 'Delete' }} '{{ _policy_name }}'"
           dellemc.powerscale.synciqpolicy:
             onefs_host: "{{ source_site_obj.onefs_host }}"
             port_no: "{{ source_site_obj.port_no | default(8080) }}"
             verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ source_site_obj.api_user }}"
             api_password: "{{ source_site_obj.api_password }}"
-            policy_name: "{{ policy_name }}"
-            action: "{{ action }}"
+            policy_name: "{{ _policy_name }}"
+            action: "{{ _action }}"
             enabled: true
             source_cluster: >-
-              {{ {'source_root_path': share_path}
-                 | combine({'source_network': {'pool': network_pool, 'subnet': network_subnet}} if (_network_resolved | bool) else {}) }}
+              {{ {'source_root_path': _share_path}
+                 | combine({'source_network': {'pool': _network_pool, 'subnet': _network_subnet}} if (_network_resolved | bool) else {}) }}
             target_cluster:
               target_host: "{{ target_site_obj.onefs_host }}"
-              target_path: "{{ target_path }}"
+              target_path: "{{ _target_path }}"
               password: "{{ target_site_obj.api_password }}"
-            run_job: "{{ 'on-schedule' if schedule is defined else 'manual' }}"
-            schedule: "{{ schedule | default(omit) }}"
-            rpo_alert: "{{ rpo_alert_minutes | default(omit) }}"
-            rpo_alert_unit: "{{ 'minutes' if rpo_alert_minutes is defined else omit }}"
-            state: "{{ state }}"
+            run_job: "{{ 'on-schedule' if (_schedule_given | bool) else 'manual' }}"
+            schedule: "{{ schedule if (_schedule_given | bool) else omit }}"
+            rpo_alert: "{{ (rpo_alert_minutes | int) if (_rpo_given | bool) else omit }}"
+            rpo_alert_unit: "{{ 'minutes' if (_rpo_given | bool) else omit }}"
+            state: "{{ _state }}"
           register: policy_change
           no_log: true
 
         - name: "[policy] Result"
           ansible.builtin.debug:
             msg: >-
-              Policy '{{ policy_name }}' ({{ share_path }} -> {{ target_site_obj.onefs_host }}:{{ target_path }}) -
+              Policy '{{ _policy_name }}' ({{ _share_path }} -> {{ target_site_obj.onefs_host }}:{{ _target_path }}) -
               {{ 'changed' if policy_change.changed else 'already in desired state, no change' }}.
 
       rescue:
@@ -490,7 +525,7 @@
             verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ source_site_obj.api_user }}"
             api_password: "{{ source_site_obj.api_password }}"
-            policy_name: "{{ policy_name }}"
+            policy_name: "{{ _policy_name }}"
             state: "absent"
           register: rollback_policy_result
           ignore_errors: true
@@ -500,7 +535,7 @@
         - name: Fail the play - report what happened
           ansible.builtin.fail:
             msg: >-
-              Setting up replication for {{ share_path }} failed.
+              Setting up replication for {{ _share_path }} failed.
               {{ 'The policy was newly created this run and has been deleted (rollback '
                   ~ ('succeeded' if not (rollback_policy_result.failed | default(false)) else 'ALSO FAILED - manual verification needed')
                   ~ ').'
@@ -509,9 +544,9 @@
               Any target export/share/quota created earlier in this run were NOT
               automatically removed (idempotent-safe to leave in place) - check
               {{ target_site_obj.onefs_host }} manually if needed.
-      when: state == 'present' or (policy_before is succeeded and (policy_before.synciq_policy_details | default({}, true) | length > 0))
+      when: _state == 'present' or (policy_before is succeeded and (policy_before.synciq_policy_details | default({}, true) | length > 0))
 
     - name: Nothing to do - policy doesn't exist and state=absent
       ansible.builtin.debug:
-        msg: "Policy '{{ policy_name }}' does not exist - nothing to remove."
-      when: state == 'absent' and (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
+        msg: "Policy '{{ _policy_name }}' does not exist - nothing to remove."
+      when: _state == 'absent' and (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
