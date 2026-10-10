@@ -30,7 +30,14 @@
           {%- endif -%}
         {%- endfor -%}
         {%- set new = (dr_new_server ~ ':' ~ best.to ~ path[best.frm | length:]) if best.frm else '' -%}
-        {%- set action = 'not mounted' if not src else ('no matching policy path' if not new else ('already there' if src == new else 'remount')) -%}
+        {#- already on a destination path on the new server (e.g. a re-run) -#}
+        {%- set done = namespace(v=false) -%}
+        {%- for m in dr_direction_map -%}
+          {%- set to = m[1] | regex_replace('/+$', '') -%}
+          {%- if src == dr_new_server ~ ':' ~ to or src.startswith(dr_new_server ~ ':' ~ to ~ '/') -%}{%- set done.v = true -%}{%- endif -%}
+        {%- endfor -%}
+        {%- set new = src if (done.v and not new) else new -%}
+        {%- set action = 'not mounted' if not src else ('already there' if (done.v or src == new) else ('no matching policy path' if not new else 'remount')) -%}
         {%- set ns.out = ns.out + [{'mp': mp, 'current': src, 'new': new, 'action': action,
              'line': mp ~ ': ' ~ (src or '-') ~ ' -> ' ~ (new or '-') ~ ' (' ~ action ~ ')'}] -%}
       {%- endfor -%}

@@ -106,6 +106,9 @@
     # Optional: name of an AWX "Machine" (SSH) credential for the NFS client
     # remount in the DR Failover / Failback templates.
     client_ssh_credential_name: ""
+    # true when that Machine credential is NOT root: the NFS client remount
+    # then uses sudo (become). Stored on the 6 DR templates.
+    dr_client_become: false
 
   tasks:
     - name: Assert awx_project_scm_type was explicitly set
@@ -803,6 +806,7 @@
         job_type: run
         extra_vars:
           dr_scope: "one"
+          dr_client_become: "{{ dr_client_become }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -888,6 +892,7 @@
         job_type: run
         extra_vars:
           dr_scope: "list"
+          dr_client_become: "{{ dr_client_become }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -973,6 +978,7 @@
         job_type: run
         extra_vars:
           dr_scope: "site"
+          dr_client_become: "{{ dr_client_become }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -1058,6 +1064,7 @@
         job_type: run
         extra_vars:
           dr_scope: "one"
+          dr_client_become: "{{ dr_client_become }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -1143,6 +1150,7 @@
         job_type: run
         extra_vars:
           dr_scope: "list"
+          dr_client_become: "{{ dr_client_become }}"
         survey_enabled: true
         survey_spec:
           name: ""
@@ -1228,6 +1236,7 @@
         job_type: run
         extra_vars:
           dr_scope: "site"
+          dr_client_become: "{{ dr_client_become }}"
         survey_enabled: true
         survey_spec:
           name: ""
