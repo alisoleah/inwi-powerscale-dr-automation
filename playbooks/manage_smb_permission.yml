@@ -15,7 +15,9 @@
 #     therefore:
 #       add      -> module, passing ONLY the new entry
 #       revoke   -> OneFS REST API PUT /platform/1/protocols/smb/shares/<name>
-#                   with the full remaining list (a true replace)
+#                   with the full remaining list (a true replace),
+#                   authenticated by API session (basic auth is off on
+#                   recent OneFS)
 #       rollback -> same REST PUT with the original list
 #     (found on a live cluster: a module-based revoke reported "no change"
 #     and the entry stayed.)
@@ -363,6 +365,41 @@
              else 'remove' if (state == 'absent' and (_target_entry_already_present | bool))
              else 'none' }}
 
+    # OneFS REST auth: session, not HTTP basic. Basic auth to PAPI is
+    # disabled by default on recent OneFS (401 "Unauthorized to access
+    # PAPI") - the dellemc SDK itself logs in via /session/1/session and
+    # sends the isisessid cookie + X-CSRF-Token + Origin on every call, so
+    # the REST writes below do the same. Only logged in when a write is due.
+    - name: "[source] Open OneFS API session (for REST revoke/rollback)"
+      ansible.builtin.uri:
+        url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/session/1/session"
+        method: POST
+        validate_certs: "{{ site.verify_ssl | default(false) }}"
+        body_format: json
+        body:
+          username: "{{ site.api_user }}"
+          password: "{{ site.api_password }}"
+          services: ["platform"]
+        status_code: [200, 201]
+      register: _src_session
+      no_log: true
+      when: _source_action != 'none'
+
+    - name: "[target] Open OneFS API session (for REST revoke/rollback)"
+      ansible.builtin.uri:
+        url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/session/1/session"
+        method: POST
+        validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
+        body_format: json
+        body:
+          username: "{{ target_site_obj.api_user }}"
+          password: "{{ target_site_obj.api_password }}"
+          services: ["platform"]
+        status_code: [200, 201]
+      register: _tgt_session
+      no_log: true
+      when: _target_action != 'none'
+
     # Write paths:
     #   add    -> dellemc.powerscale.smb with ONLY the new entry. The module
     #             MERGES the given list into the share's existing entries
@@ -400,9 +437,10 @@
           ansible.builtin.uri:
             url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
             method: PUT
-            url_username: "{{ site.api_user }}"
-            url_password: "{{ site.api_password }}"
-            force_basic_auth: true
+            headers:
+              Cookie: "isisessid={{ _src_session.cookies.isisessid }}"
+              X-CSRF-Token: "{{ _src_session.cookies.isicsrf }}"
+              Origin: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}"
             validate_certs: "{{ site.verify_ssl | default(false) }}"
             body_format: json
             body:
@@ -444,9 +482,10 @@
           ansible.builtin.uri:
             url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
             method: PUT
-            url_username: "{{ target_site_obj.api_user }}"
-            url_password: "{{ target_site_obj.api_password }}"
-            force_basic_auth: true
+            headers:
+              Cookie: "isisessid={{ _tgt_session.cookies.isisessid }}"
+              X-CSRF-Token: "{{ _tgt_session.cookies.isicsrf }}"
+              Origin: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}"
             validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
             body_format: json
             body:
@@ -470,9 +509,10 @@
           ansible.builtin.uri:
             url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
             method: PUT
-            url_username: "{{ site.api_user }}"
-            url_password: "{{ site.api_password }}"
-            force_basic_auth: true
+            headers:
+              Cookie: "isisessid={{ _src_session.cookies.isisessid }}"
+              X-CSRF-Token: "{{ _src_session.cookies.isicsrf }}"
+              Origin: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}"
             validate_certs: "{{ site.verify_ssl | default(false) }}"
             body_format: json
             body:
@@ -487,9 +527,10 @@
           ansible.builtin.uri:
             url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
             method: PUT
-            url_username: "{{ target_site_obj.api_user }}"
-            url_password: "{{ target_site_obj.api_password }}"
-            force_basic_auth: true
+            headers:
+              Cookie: "isisessid={{ _tgt_session.cookies.isisessid }}"
+              X-CSRF-Token: "{{ _tgt_session.cookies.isicsrf }}"
+              Origin: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}"
             validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
             body_format: json
             body:
@@ -508,4 +549,24 @@
                  else 'ALSO FAILED - manual verification/intervention needed' }}.
               {{ ('Target rollback ' ~ ('succeeded' if not (rollback_target_result.failed | default(false)) else 'ALSO FAILED - manual verification/intervention needed') ~ '.')
                  if _target_action != 'none' else '' }}
+      always:
+        - name: Close OneFS API sessions
+          ansible.builtin.uri:
+            url: "https://{{ item.host }}:{{ item.port }}/session/1/session"
+            method: DELETE
+            validate_certs: false
+            headers:
+              Cookie: "isisessid={{ item.sess.cookies.isisessid }}"
+              X-CSRF-Token: "{{ item.sess.cookies.isicsrf }}"
+              Origin: "https://{{ item.host }}:{{ item.port }}"
+            status_code: [200, 204, 401]
+          loop: >-
+            {{ ([{'host': site.onefs_host, 'port': site.port_no | default(8080), 'sess': _src_session}]
+                if (_src_session.cookies is defined) else [])
+               + ([{'host': target_site_obj.onefs_host, 'port': target_site_obj.port_no | default(8080), 'sess': _tgt_session}]
+                  if (_tgt_session.cookies is defined) else []) }}
+          loop_control:
+            label: "{{ item.host }}"
+          ignore_errors: true
+          no_log: true
       when: _source_action != 'none' or _target_action != 'none'
