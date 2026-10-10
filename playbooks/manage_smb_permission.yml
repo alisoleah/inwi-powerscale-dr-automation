@@ -429,7 +429,7 @@
                      else {'wellknown': trustee_name})
                     | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
             state: "present"
-          register: smb_change
+          register: smb_add
           no_log: true
           when: _source_action == 'add'
 
@@ -446,7 +446,7 @@
             body:
               permissions: "{{ _without_entry }}"
             status_code: [200, 204]
-          register: smb_change
+          register: smb_remove
           changed_when: true
           no_log: true
           when: _source_action == 'remove'
@@ -456,7 +456,7 @@
             msg: >-
               {{ trustee_name }} {{ 'added to' if _source_action == 'add' else 'removed from' }}
               {{ share_name }}'s permissions -
-              {{ 'changed' if smb_change.changed else 'already in desired state, no change' }}.
+              {{ 'changed' if (smb_add is changed or smb_remove is changed) else 'already in desired state, no change' }}.
           when: _source_action != 'none'
 
         - name: "[{{ share_name }}] (target) Add {{ trustee_name }}"
@@ -474,7 +474,7 @@
                      else {'wellknown': trustee_name})
                     | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
             state: "present"
-          register: smb_target_change
+          register: smb_target_add
           no_log: true
           when: _target_action == 'add'
 
@@ -491,7 +491,7 @@
             body:
               permissions: "{{ _target_without_entry }}"
             status_code: [200, 204]
-          register: smb_target_change
+          register: smb_target_remove
           changed_when: true
           no_log: true
           when: _target_action == 'remove'
@@ -501,7 +501,7 @@
             msg: >-
               {{ trustee_name }} {{ 'added to' if _target_action == 'add' else 'removed from' }}
               {{ share_name }}'s permissions on {{ target_site_obj.onefs_host }} -
-              {{ 'changed' if smb_target_change.changed else 'already in desired state, no change' }}.
+              {{ 'changed' if (smb_target_add is changed or smb_target_remove is changed) else 'already in desired state, no change' }}.
           when: _target_action != 'none'
 
       rescue:
