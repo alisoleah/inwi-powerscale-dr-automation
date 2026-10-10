@@ -738,19 +738,23 @@
               type: "multiplechoice"
               choices: "site_a\nsite_b"
               required: true
-            - question_name: "Share path (source)"
+            - question_name: "Share path (source) - NFS / mixed"
               question_description: >-
-                Must be an EXISTING NFS export on the source, e.g.
-                /ifs/data/finance. This mirrors an existing share's DR
-                setup - it does not create brand-new shares from scratch.
+                Path of an EXISTING NFS export on the source, e.g.
+                /ifs/data/finance. Leave blank for an SMB-only share (the
+                path is then taken from the SMB share below). Fill in
+                together with the SMB share name for a mixed share. This
+                mirrors an existing share's DR setup - it does not create
+                brand-new shares from scratch.
               variable: "share_path"
               type: "text"
-              required: true
-            - question_name: "SMB share name (optional)"
+              required: false
+            - question_name: "SMB share name - SMB / mixed"
               question_description: >-
-                If set, also mirrors this SMB share and its permissions
-                to the target. Leave blank to only handle NFS + the
-                SyncIQ policy.
+                Name of an EXISTING SMB share on the source. If set, this
+                share and its permissions are mirrored to the target.
+                Leave blank for an NFS-only share. At least one of Share
+                path / SMB share name is required.
               variable: "smb_share_name"
               type: "text"
               required: false

@@ -37,12 +37,18 @@
 #   source_site   site_a | site_b - the replication SOURCE
 #   target_site   site_a | site_b - the replication TARGET (must differ
 #                 from source_site)
-#   share_path    e.g. "/ifs/data/finance" - must be an EXISTING NFS
-#                 export on the source (this playbook mirrors an existing
-#                 share's DR setup, it does not create brand-new shares
-#                 from scratch - use provision_share.yml for that)
+#   share_path and/or smb_share_name - at least one is required:
+#     NFS only : share_path      e.g. "/ifs/data/finance" - an EXISTING
+#                                NFS export on the source
+#     SMB only : smb_share_name  an EXISTING SMB share on the source; its
+#                                path is used as share_path
+#     mixed    : both - the SMB share's path must equal share_path
+#   (this playbook mirrors an existing share's DR setup, it does not
+#   create brand-new shares from scratch - use provision_share.yml for
+#   that). SyncIQ replicates the directory either way; the protocol
+#   objects found on the source decide what gets mirrored on the target.
 # Optional:
-#   smb_share_name    if set, also mirrors this SMB share (by name) and
+#   smb_share_name    (see above) mirrors this SMB share (by name) and
 #                     its permissions to the target
 #   quota_gb          if set, also ensures a matching quota (this size)
 #                     exists on the target
@@ -70,7 +76,13 @@
 #     -e share_path=/ifs/data/finance \
 #     -e schedule="every 4 hours"
 #
-# Example - also mirror the SMB share and a quota:
+# Example - SMB-only share (path taken from the share):
+#   ansible-playbook playbooks/setup_share_replication.yml \
+#     -e source_site=site_a \
+#     -e target_site=site_b \
+#     -e smb_share_name=hr_docs
+#
+# Example - mixed: also mirror the SMB share and a quota:
 #   ansible-playbook playbooks/setup_share_replication.yml \
 #     -e source_site=site_a \
 #     -e target_site=site_b \
@@ -107,19 +119,16 @@
           - target_site is defined
           - target_site in sites
           - source_site != target_site
-          - share_path is defined
-          - share_path | length > 0
+          - (share_path | default('') | length > 0) or (smb_share_name | default('') | length > 0)
         fail_msg: >-
           Required: source_site and target_site (one of
           {{ sites.keys() | join(', ') }}, and different from each other),
-          share_path.
+          plus share_path (NFS / mixed) and/or smb_share_name (SMB / mixed).
 
     - name: Resolve working variables
       ansible.builtin.set_fact:
         source_site_obj: "{{ sites[source_site] }}"
         target_site_obj: "{{ sites[target_site] }}"
-        target_path: "{{ target_path | default(share_path) }}"
-        policy_name: "{{ policy_name | default((share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
         action: "{{ action | default('sync') }}"
         state: "{{ state | default('present') }}"
 
@@ -151,19 +160,7 @@
 
   tasks:
     # ---- 1. Read the source's current state ----
-    - name: "[source] Capture current NFS export at {{ share_path }}"
-      dellemc.powerscale.nfs:
-        onefs_host: "{{ source_site_obj.onefs_host }}"
-        port_no: "{{ source_site_obj.port_no | default(8080) }}"
-        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
-        api_user: "{{ source_site_obj.api_user }}"
-        api_password: "{{ source_site_obj.api_password }}"
-        path: "{{ share_path }}"
-        state: "present"
-      check_mode: true
-      register: source_nfs
-      no_log: true
-
+    # SMB first: for an SMB-only share, share_path comes from the share.
     - name: "[source] Capture current SMB share '{{ smb_share_name | default('') }}'"
       dellemc.powerscale.smb:
         onefs_host: "{{ source_site_obj.onefs_host }}"
@@ -178,6 +175,73 @@
       no_log: true
       when: smb_share_name is defined
 
+    - name: Fail fast if smb_share_name was given but doesn't exist on source
+      ansible.builtin.fail:
+        msg: >-
+          smb_share_name='{{ smb_share_name }}' was given but no such SMB
+          share exists on {{ source_site_obj.onefs_host }}.
+      when: >-
+        smb_share_name is defined and
+        (source_smb is failed or source_smb.smb_details.shares | default([]) | length == 0)
+
+    - name: Take share_path from the SMB share if not given (SMB-only)
+      ansible.builtin.set_fact:
+        share_path: "{{ source_smb.smb_details.shares[0].path }}"
+      when: share_path | default('') | length == 0
+
+    - name: Fail fast if share_path and the SMB share's path disagree (mixed)
+      ansible.builtin.fail:
+        msg: >-
+          share_path '{{ share_path }}' does not match SMB share
+          '{{ smb_share_name }}' path '{{ source_smb.smb_details.shares[0].path }}'
+          on {{ source_site_obj.onefs_host }} - for a mixed share both must
+          point at the same directory.
+      when: >-
+        smb_share_name is defined and
+        (share_path | regex_replace('/+$', '')) != (source_smb.smb_details.shares[0].path | regex_replace('/+$', ''))
+
+    - name: Resolve target_path and policy_name
+      ansible.builtin.set_fact:
+        target_path: "{{ target_path | default(share_path) }}"
+        policy_name: "{{ policy_name | default((share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
+
+    - name: "[source] Capture current NFS export at {{ share_path }}"
+      dellemc.powerscale.nfs:
+        onefs_host: "{{ source_site_obj.onefs_host }}"
+        port_no: "{{ source_site_obj.port_no | default(8080) }}"
+        verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
+        api_user: "{{ source_site_obj.api_user }}"
+        api_password: "{{ source_site_obj.api_password }}"
+        path: "{{ share_path }}"
+        state: "present"
+      check_mode: true
+      register: source_nfs
+      no_log: true
+
+    # The dellemc.powerscale modules ALWAYS return their *_details key -
+    # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
+    # 'is defined' is always true. Test for emptiness instead.
+    - name: Resolve which protocols the source share has
+      ansible.builtin.set_fact:
+        _source_has_nfs: "{{ source_nfs.NFS_export_details | default({}, true) | length > 0 }}"
+        _source_has_smb: "{{ smb_share_name is defined }}"
+
+    - name: Fail fast if there's nothing to replicate at this path
+      ansible.builtin.fail:
+        msg: >-
+          No NFS export found at '{{ share_path }}' on
+          {{ source_site_obj.onefs_host }} and no smb_share_name given
+          (this playbook mirrors an EXISTING share's DR setup, it does not
+          create brand-new shares - use provision_share.yml for that). For
+          an SMB-only share, pass smb_share_name.
+      when: not (_source_has_nfs | bool) and not (_source_has_smb | bool)
+
+    - name: "[source] Protocols to mirror"
+      ansible.builtin.debug:
+        msg: >-
+          {{ share_path }}: {{ 'mixed NFS + SMB' if (_source_has_nfs | bool and _source_has_smb | bool)
+             else 'NFS only' if (_source_has_nfs | bool) else 'SMB only' }}.
+
     - name: Convert source SMB permissions to module INPUT shape (for mirroring)
       ansible.builtin.set_fact:
         _mirror_permissions: >-
@@ -191,27 +255,6 @@
       loop_control:
         loop_var: perm_item
         label: "{{ perm_item.trustee.name }}"
-
-    # The dellemc.powerscale modules ALWAYS return their *_details key -
-    # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
-    # 'is defined' is always true. Test for emptiness instead.
-    - name: Fail fast if there's nothing to replicate at this path
-      ansible.builtin.fail:
-        msg: >-
-          No NFS export found at '{{ share_path }}' on
-          {{ source_site_obj.onefs_host }} (this playbook mirrors an
-          EXISTING share's DR setup, it does not create brand-new shares -
-          use provision_share.yml for that).
-      when: (source_nfs.NFS_export_details | default({}, true) | length == 0)
-
-    - name: Fail fast if smb_share_name was given but doesn't exist on source
-      ansible.builtin.fail:
-        msg: >-
-          smb_share_name='{{ smb_share_name }}' was given but no such SMB
-          share exists on {{ source_site_obj.onefs_host }}.
-      when: >-
-        smb_share_name is defined and
-        (source_smb is failed or source_smb.smb_details.shares | default([]) | length == 0)
 
     - name: "[source] Capture current quota at {{ share_path }}"
       dellemc.powerscale.smartquota:
@@ -230,7 +273,7 @@
 
     - name: Resolve access_zone from the source export
       ansible.builtin.set_fact:
-        access_zone: "{{ source_nfs.NFS_export_details.zone | default('System') }}"
+        access_zone: "{{ source_nfs.NFS_export_details.zone | default(access_zone | default('System'), true) }}"
 
     # ---- 2. Resolve the SyncIQ source network (optional) ----
     - name: Resolve network_pool/network_subnet if both already given
@@ -282,6 +325,7 @@
       check_mode: true
       register: target_nfs
       no_log: true
+      when: _source_has_nfs | bool
 
     - name: "[target] Check whether a matching SMB share already exists"
       dellemc.powerscale.smb:
@@ -344,7 +388,7 @@
             state: "present"
           register: target_nfs_created
           no_log: true
-          when: (target_nfs.NFS_export_details | default({}, true) | length == 0) and state == 'present'
+          when: (_source_has_nfs | bool) and (target_nfs.NFS_export_details | default({}, true) | length == 0) and state == 'present'
 
         - name: "[target] Report NFS export status"
           ansible.builtin.debug:
@@ -352,7 +396,7 @@
               {{ 'Created a new NFS export at ' ~ target_path ~ ' on ' ~ target_site_obj.onefs_host ~ ', mirroring source clients.'
                  if (target_nfs.NFS_export_details | default({}, true) | length == 0)
                  else 'Target already has an NFS export at ' ~ target_path ~ ' - left as-is (not overwritten).' }}
-          when: state == 'present'
+          when: state == 'present' and (_source_has_nfs | bool)
 
         - name: "[target] Create missing SMB share, mirroring source's permissions"
           dellemc.powerscale.smb:
