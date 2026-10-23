@@ -122,6 +122,7 @@
         permission_type: "{{ permission_type | default('allow') }}"
         provider_type: "{{ provider_type | default('local') }}"
         access_zone: "{{ access_zone | default('System') }}"
+      no_log: true
 
     - name: Validate permission_type
       ansible.builtin.assert:
@@ -271,6 +272,7 @@
         - name: Resolve target site connection details
           ansible.builtin.set_fact:
             target_site_obj: "{{ sites[replication_target_site] }}"
+          no_log: true
 
         - name: Check whether the target share exists (read-only)
           dellemc.powerscale.smb:

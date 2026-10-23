@@ -146,6 +146,7 @@
         _quota_given: "{{ (quota_gb | default(0, true) | int) > 0 }}"
         _schedule_given: "{{ schedule | default('') | string | trim | length > 0 }}"
         _rpo_given: "{{ rpo_alert_minutes | default('') | string | trim | length > 0 }}"
+      no_log: true
 
     - name: Validate action/state
       ansible.builtin.assert:
