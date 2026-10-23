@@ -187,7 +187,6 @@
         state: "present"
       register: source_smb
       ignore_errors: true
-      no_log: true
       when: (_smb_given | bool)
 
     - name: Fail fast if smb_share_name was given but doesn't exist on source
@@ -233,7 +232,6 @@
         state: "present"
       check_mode: true
       register: source_nfs
-      no_log: true
 
     # The dellemc.powerscale modules ALWAYS return their *_details key -
     # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
@@ -285,7 +283,6 @@
         state: "present"
       check_mode: true
       register: source_quota
-      no_log: true
       when: (_quota_given | bool)
 
     - name: Resolve access_zone from the source export
@@ -309,7 +306,6 @@
         gather_subset:
           - network_pools
       register: source_pools
-      no_log: true
       when: not (_network_resolved | bool)
 
     - name: Auto-select the pool if exactly one is configured
@@ -343,7 +339,6 @@
         state: "present"
       check_mode: true
       register: target_nfs
-      no_log: true
       when: _source_has_nfs | bool
 
     - name: "[target] Check whether a matching SMB share already exists"
@@ -357,7 +352,6 @@
         state: "present"
       register: target_smb
       ignore_errors: true
-      no_log: true
       when: (_smb_given | bool)
 
     - name: "[target] Check whether a matching quota already exists"
@@ -373,7 +367,6 @@
         state: "present"
       check_mode: true
       register: target_quota
-      no_log: true
       when: (_quota_given | bool)
 
     - name: "[policy] Check whether this policy already exists"
@@ -387,7 +380,6 @@
         state: "present"
       register: policy_before
       ignore_errors: true
-      no_log: true
 
     - block:
         # ---- 4. Create missing target objects (never overwrite existing ones) ----
@@ -410,7 +402,6 @@
               provider_type: "file"
             state: "present"
           register: target_dir
-          no_log: true
           when: _state == 'present'
 
         - name: "[target] Create missing NFS export, mirroring source's clients"
@@ -428,7 +419,6 @@
             root_clients: "{{ source_nfs.NFS_export_details.root_clients | default([]) }}"
             state: "present"
           register: target_nfs_created
-          no_log: true
           when: (_source_has_nfs | bool) and (target_nfs.NFS_export_details | default({}, true) | length == 0) and _state == 'present'
 
         - name: "[target] Report NFS export status"
@@ -452,7 +442,6 @@
             permissions: "{{ _mirror_permissions | default([]) }}"
             state: "present"
           register: target_smb_created
-          no_log: true
           when: >-
             (_smb_given | bool) and _state == 'present' and
             (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
@@ -480,7 +469,6 @@
               cap_unit: "GB"
             state: "present"
           register: target_quota_created
-          no_log: true
           when: (_quota_given | bool) and _state == 'present' and (target_quota.quota_details | default({}, true) | length == 0)
 
         - name: "[target] Report quota status"
@@ -515,7 +503,6 @@
             rpo_alert_unit: "{{ 'minutes' if (_rpo_given | bool) else omit }}"
             state: "{{ _state }}"
           register: policy_change
-          no_log: true
 
         - name: "[policy] Result"
           ansible.builtin.debug:
@@ -535,7 +522,6 @@
             state: "absent"
           register: rollback_policy_result
           ignore_errors: true
-          no_log: true
           when: policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0)
 
         - name: Fail the play - report what happened

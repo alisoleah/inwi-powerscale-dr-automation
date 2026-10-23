@@ -165,7 +165,6 @@
         state: "present"
       register: smb_before
       ignore_errors: true
-      no_log: true
 
     - name: Fail fast if the share doesn't exist (or another error occurred)
       ansible.builtin.fail:
@@ -285,7 +284,6 @@
             state: "present"
           register: smb_target_before
           ignore_errors: true
-          no_log: true
 
         - name: Report if the target share is missing
           ansible.builtin.debug:
@@ -430,7 +428,6 @@
                     | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
             state: "present"
           register: smb_add
-          no_log: true
           when: _source_action == 'add'
 
         - name: "[{{ share_name }}] (source) Remove {{ trustee_name }}"
@@ -475,7 +472,6 @@
                     | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
             state: "present"
           register: smb_target_add
-          no_log: true
           when: _target_action == 'add'
 
         - name: "[{{ share_name }}] (target) Remove {{ trustee_name }}"

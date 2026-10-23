@@ -124,7 +124,6 @@
         state: "present"
       check_mode: true
       register: quota_before
-      no_log: true
 
     # The dellemc.powerscale modules ALWAYS return their *_details key -
     # {} (nfs, synciqpolicy) or None (smartquota) when nothing exists - so
@@ -198,7 +197,6 @@
             state: "present"
           check_mode: true
           register: quota_target_before
-          no_log: true
 
         - name: Report if the target quota is missing
           ansible.builtin.debug:
@@ -238,7 +236,6 @@
               cap_unit: "GB"
             state: "present"
           register: quota_change
-          no_log: true
 
         - name: "[{{ quota_path }}] Source result"
           ansible.builtin.debug:
@@ -262,7 +259,6 @@
               cap_unit: "GB"
             state: "present"
           register: quota_target_change
-          no_log: true
           when: _apply_to_target_effective
 
         - name: "[{{ replication_target_path | default('') }}] Target result"
@@ -290,7 +286,6 @@
             state: "present"
           register: rollback_source_result
           ignore_errors: true
-          no_log: true
 
         - name: "ROLLBACK [{{ replication_target_path | default('') }}] (target) - restore original hard limit"
           dellemc.powerscale.smartquota:
@@ -308,7 +303,6 @@
             state: "present"
           register: rollback_target_result
           ignore_errors: true
-          no_log: true
           when: _apply_to_target_effective
 
         - name: Fail the play - report rollback outcome

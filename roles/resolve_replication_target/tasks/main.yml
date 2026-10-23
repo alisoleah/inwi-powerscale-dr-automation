@@ -50,7 +50,6 @@
     gather_subset:
       - synciq_policies
   register: synciq_list
-  no_log: true
 
 - name: Find policies whose source_root_path covers source_path
   ansible.builtin.set_fact:
@@ -78,7 +77,6 @@
     policy_name: "{{ _matching_policies[0].name }}"
     state: present
   register: policy_details
-  no_log: true
   when: replication_found | bool
 
 - name: Resolve which sites.yml key matches the policy's target_host, if any
