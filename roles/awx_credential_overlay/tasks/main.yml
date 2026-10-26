@@ -21,24 +21,11 @@
 # AWX surfaces as validate_input's normal CHANGE_ME failure instead of a
 # confusing partial-merge state.
 #
-# network_pool/network_subnet are NOT required in the Credential Type, so
-# AWX injects them as an empty string ('') rather than omitting them
-# entirely when left blank in the Credential form. Jinja's default() filter
-# only replaces UNDEFINED values by default - it does NOT treat '' as
-# needing a default - so plain `| default(sites.site_a.network_pool)` would
-# silently let an empty string through instead of falling back to whatever
-# sites.yml has. Passing `true` as the second arg makes default() also
-# treat falsy values (including '') as needing the fallback - see
-# https://docs.ansible.com/ansible/latest/collections/ansible/builtin/vars_filter.html
-# ("default" section) for this exact behavior. validate_input additionally
-# checks these fields for non-empty length, not just != CHANGE_ME, as a
-# second line of defense against the same class of gap.
-#
-# Hardcodes site_a/site_b since that matches this project's explicit 2-site
-# scope throughout (see INWI-DR-Automation-Plan.md). If INWI ever needs a
-# 3rd site, add a matching block below plus a matching 3rd Credential Type -
-# this isn't written as a generic loop since AWX Credential Type field names
-# can't be templated dynamically per-site anyway.
+# network_pool/network_subnet are OPTIONAL. AWX injects them as '' when
+# left blank in the Credential; that empty value is kept as-is (it used to
+# fall back to sites.yml's CHANGE_ME placeholder, which then failed
+# validate_input). Empty means: Setup Share Replication auto-detects the
+# source pool, or creates the policy without a network restriction.
 
 - name: Overlay AWX-injected Site A credential onto sites.site_a, if present
   ansible.builtin.set_fact:
@@ -47,8 +34,8 @@
           'onefs_host': site_a_onefs_host,
           'api_user': site_a_api_user,
           'api_password': site_a_api_password,
-          'network_pool': site_a_network_pool | default(sites.site_a.network_pool, true),
-          'network_subnet': site_a_network_subnet | default(sites.site_a.network_subnet, true),
+          'network_pool': site_a_network_pool | default(''),
+          'network_subnet': site_a_network_subnet | default(''),
         }, recursive=True)
       }, recursive=True) }}"
   when:
@@ -66,8 +53,8 @@
           'onefs_host': site_b_onefs_host,
           'api_user': site_b_api_user,
           'api_password': site_b_api_password,
-          'network_pool': site_b_network_pool | default(sites.site_b.network_pool, true),
-          'network_subnet': site_b_network_subnet | default(sites.site_b.network_subnet, true),
+          'network_pool': site_b_network_pool | default(''),
+          'network_subnet': site_b_network_subnet | default(''),
         }, recursive=True)
       }, recursive=True) }}"
   when:

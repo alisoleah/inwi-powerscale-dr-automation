@@ -50,18 +50,16 @@
       - sites[item].api_password is defined
       - sites[item].api_password | length > 0
       - sites[item].api_password != "CHANGE_ME"
-      - sites[item].network_pool is defined
-      - sites[item].network_pool | length > 0
-      - sites[item].network_pool != "CHANGE_ME"
-      - sites[item].network_subnet is defined
-      - sites[item].network_subnet | length > 0
-      - sites[item].network_subnet != "CHANGE_ME"
+      # network_pool / network_subnet are OPTIONAL: empty means Setup Share
+      # Replication auto-detects the pool (or sets no network restriction).
+      - (sites[item].network_pool | default('') | string) != "CHANGE_ME"
+      - (sites[item].network_subnet | default('') | string) != "CHANGE_ME"
     fail_msg: >-
       Site '{{ item }}' is missing a required field (onefs_host, api_user,
-      api_password, network_pool, network_subnet), one is empty, or one still
-      has a CHANGE_ME placeholder value - edit group_vars/all/sites.yml (or
-      check the attached AWX Credential's optional fields aren't blank)
-      before running against a real cluster.
+      api_password), one is empty, or a field still has a CHANGE_ME
+      placeholder value - edit group_vars/all/sites.yml or check the
+      attached AWX Credential before running against a real cluster.
+      (network_pool / network_subnet may be left empty.)
   # Only validates active_sites (all sites, or just target_site if set) -
   # a site excluded from this run via target_site is allowed to keep
   # CHANGE_ME placeholders without blocking it. Looping over just the site

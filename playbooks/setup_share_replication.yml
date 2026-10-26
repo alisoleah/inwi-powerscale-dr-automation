@@ -291,11 +291,21 @@
         access_zone: "{{ source_nfs.NFS_export_details.zone | default(access_zone | default('System'), true) }}"
 
     # ---- 2. Resolve the SyncIQ source network (optional) ----
+    # Order: Survey / extra_vars, then the source site's credential (or
+    # sites.yml) values, then auto-detection below. Empty or CHANGE_ME
+    # values are ignored.
     - name: Resolve network_pool/network_subnet if both already given
       ansible.builtin.set_fact:
-        _network_resolved: "{{ (network_pool | default('') | string | length > 0) and (network_subnet | default('') | string | length > 0) }}"
-        _network_pool: "{{ network_pool | default('') }}"
-        _network_subnet: "{{ network_subnet | default('') }}"
+        _network_pool: >-
+          {{ network_pool | default('', true) | string
+             or ((source_site_obj.network_pool | default('') | string) | regex_replace('^CHANGE_ME$', '')) }}
+        _network_subnet: >-
+          {{ network_subnet | default('', true) | string
+             or ((source_site_obj.network_subnet | default('') | string) | regex_replace('^CHANGE_ME$', '')) }}
+
+    - name: Mark the network as resolved when both values are known
+      ansible.builtin.set_fact:
+        _network_resolved: "{{ (_network_pool | length > 0) and (_network_subnet | length > 0) }}"
 
     - name: Auto-detect the source cluster's network pools, if not given
       dellemc.powerscale.info:
