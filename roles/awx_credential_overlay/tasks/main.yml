@@ -30,6 +30,12 @@
 # fall back to sites.yml's CHANGE_ME placeholder, which then failed
 # validate_input). Empty means: Setup Share Replication auto-detects the
 # source pool, or creates the policy without a network restriction.
+#
+# Hardcodes site_a/site_b since that matches this project's explicit 2-site
+# scope throughout (see INWI-DR-Automation-Plan.md). If INWI ever needs a
+# 3rd site, add a matching block below plus a matching 3rd Credential Type -
+# this isn't written as a generic loop since AWX Credential Type field names
+# can't be templated dynamically per-site anyway.
 
 - name: Overlay AWX-injected Site A credential onto sites.site_a, if present
   ansible.builtin.set_fact:
