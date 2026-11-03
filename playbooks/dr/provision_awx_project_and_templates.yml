@@ -436,7 +436,7 @@
       awx.awx.job_template:
         name: "PowerScale - Manage NFS Client"
         description: |-
-          Adds/removes one client on an EXISTING NFS export.
+          Adds/removes one or more clients (comma-separated) on an EXISTING NFS export; absent removes only those clients, never the export.
           Example extra_vars (add):
           {"target_site": "site_a", "export_path": "/ifs/data/finance", "client_ip": "10.20.0.5", "state": "present"}
           Example extra_vars (remove from read-only list, mirror to DR target):
@@ -466,8 +466,11 @@
               variable: "export_path"
               type: "text"
               required: true
-            - question_name: "Client IP or CIDR"
-              question_description: "e.g. 10.20.0.5 or 10.20.0.0/24"
+            - question_name: "Client(s) - IP, CIDR or hostname"
+              question_description: >-
+                One or more, comma-separated, e.g. 10.20.0.5 or
+                10.20.0.5, 10.20.0.6, 10.30.0.0/24. Action absent removes
+                only these clients from the chosen list - never the export.
               variable: "client_ip"
               type: "text"
               required: true

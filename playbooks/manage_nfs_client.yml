@@ -18,7 +18,8 @@
 #   export_path   e.g. "/ifs/data/finance" - must be an EXISTING NFS export
 #                 (this playbook edits an export's client list, it does not
 #                 create new exports - use provision_share.yml for that)
-#   client_ip     e.g. "10.20.0.5" or a CIDR
+#   client_ip     one or more clients, comma-separated: IPs, CIDRs or
+#                 hostnames, e.g. "10.20.0.5" or "10.20.0.5, 10.20.0.0/24"
 #   state         present | absent
 # Optional:
 #   client_list      clients | read_only_clients | read_write_clients | root_clients
@@ -90,9 +91,19 @@
     - name: Resolve working variables
       ansible.builtin.set_fact:
         site: "{{ sites[target_site] }}"
+        _clients: "{{ (client_ip | string).split(',') | map('trim') | reject('equalto', '') | unique | list }}"
         client_list: "{{ client_list | default('clients') }}"
         access_zone: "{{ access_zone | default('System') }}"
       no_log: true
+
+    - name: Validate the client list
+      ansible.builtin.assert:
+        that:
+          - _clients | length > 0
+          - _clients | reject('match', '^[A-Za-z0-9.:/_*@-]+$') | list | length == 0
+        fail_msg: >-
+          client_ip must be one or more IPs / CIDRs / hostnames, comma-separated.
+          Invalid: {{ _clients | reject('match', '^[A-Za-z0-9.:/_*@-]+$') | list }}
 
     - name: Validate client_list value
       ansible.builtin.assert:
@@ -215,7 +226,7 @@
              and ((nfs_target_before.NFS_export_details | default({}, true) | length > 0)) }}
 
     - block:
-        - name: "[{{ export_path }}] (source) {{ 'Add' if state == 'present' else 'Remove' }} {{ client_ip }} {{ 'to' if state == 'present' else 'from' }} {{ client_list }}"
+        - name: "[{{ export_path }}] (source) {{ 'Add' if state == 'present' else 'Remove' }} {{ _clients | join(', ') }} {{ 'to' if state == 'present' else 'from' }} {{ client_list }}"
           dellemc.powerscale.nfs:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
@@ -226,17 +237,17 @@
             access_zone: "{{ access_zone }}"
             client_state: "{{ 'present-in-export' if state == 'present' else 'absent-in-export' }}"
             state: "present"
-          args: "{{ {client_list: [client_ip]} }}"
+          args: "{{ {client_list: _clients} }}"
           register: nfs_change
 
         - name: "[{{ export_path }}] Source result"
           ansible.builtin.debug:
             msg: >-
-              {{ client_ip }} {{ 'added to' if state == 'present' else 'removed from' }}
+              {{ _clients | join(', ') }} {{ 'added to' if state == 'present' else 'removed from' }}
               {{ client_list }} on {{ export_path }} -
               {{ 'changed' if nfs_change.changed else 'already in desired state, no change' }}.
 
-        - name: "[{{ replication_target_path | default('') }}] (target) {{ 'Add' if state == 'present' else 'Remove' }} {{ client_ip }} {{ 'to' if state == 'present' else 'from' }} {{ client_list }}"
+        - name: "[{{ replication_target_path | default('') }}] (target) {{ 'Add' if state == 'present' else 'Remove' }} {{ _clients | join(', ') }} {{ 'to' if state == 'present' else 'from' }} {{ client_list }}"
           dellemc.powerscale.nfs:
             onefs_host: "{{ target_site_obj.onefs_host }}"
             port_no: "{{ target_site_obj.port_no | default(8080) }}"
@@ -247,14 +258,14 @@
             access_zone: "{{ access_zone }}"
             client_state: "{{ 'present-in-export' if state == 'present' else 'absent-in-export' }}"
             state: "present"
-          args: "{{ {client_list: [client_ip]} }}"
+          args: "{{ {client_list: _clients} }}"
           register: nfs_target_change
           when: _apply_to_target_effective | bool
 
         - name: "[{{ replication_target_path | default('') }}] Target result"
           ansible.builtin.debug:
             msg: >-
-              {{ client_ip }} {{ 'added to' if state == 'present' else 'removed from' }}
+              {{ _clients | join(', ') }} {{ 'added to' if state == 'present' else 'removed from' }}
               {{ client_list }} on {{ replication_target_path }} ({{ target_site_obj.onefs_host }}) -
               {{ 'changed' if nfs_target_change.changed else 'already in desired state, no change' }}.
           when: _apply_to_target_effective | bool
