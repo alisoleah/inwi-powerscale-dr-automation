@@ -608,17 +608,25 @@
             state: "absent"
           register: rollback_policy_result
           ignore_errors: true
-          when: policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0)
+          # only if the policy step actually ran (and the policy didn't exist before)
+          when:
+            - policy_change is defined
+            - policy_change is not skipped
+            - policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0)
 
         - name: Fail the play - report what happened
           ansible.builtin.fail:
             msg: >-
-              Setting up replication for {{ _share_path }} failed.
-              {{ 'The policy was newly created this run and has been deleted (rollback '
-                  ~ ('succeeded' if not (rollback_policy_result.failed | default(false)) else 'ALSO FAILED - manual verification needed')
-                  ~ ').'
-                 if (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
-                 else 'The policy already existed before this run and was left untouched.' }}
+              Setting up replication for {{ _share_path }} failed at
+              "{{ ansible_failed_task.name | default('?') }}":
+              {{ (ansible_failed_result.msg | default('see above')) | string | truncate(400) }}.
+              {{ ('The SyncIQ policy was not created (the run stopped before that step).'
+                  if (policy_change is not defined or policy_change is skipped)
+                  else ('The policy was newly created this run and has been deleted (rollback '
+                        ~ ('succeeded' if not (rollback_policy_result.failed | default(false)) else 'ALSO FAILED - manual verification needed')
+                        ~ ').'
+                        if (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
+                        else 'The policy already existed before this run and was left untouched.')) }}
               Any target export/share/quota created earlier in this run were NOT
               automatically removed (idempotent-safe to leave in place) - check
               {{ target_site_obj.onefs_host }} manually if needed.
