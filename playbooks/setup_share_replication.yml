@@ -622,11 +622,14 @@
               {{ (ansible_failed_result.msg | default('see above')) | string | truncate(400) }}.
               {{ ('The SyncIQ policy was not created (the run stopped before that step).'
                   if (policy_change is not defined or policy_change is skipped)
+                  else (("The SyncIQ policy step itself failed, so the policy was most likely not created - check with 'isi sync policies list' on "
+                         ~ source_site_obj.onefs_host ~ '.')
+                        if (policy_change is failed)
                   else ('The policy was newly created this run and has been deleted (rollback '
                         ~ ('succeeded' if not (rollback_policy_result.failed | default(false)) else 'ALSO FAILED - manual verification needed')
                         ~ ').'
                         if (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
-                        else 'The policy already existed before this run and was left untouched.')) }}
+                        else 'The policy already existed before this run and was left untouched.'))) }}
               Any target export/share/quota created earlier in this run were NOT
               automatically removed (idempotent-safe to leave in place) - check
               {{ target_site_obj.onefs_host }} manually if needed.
