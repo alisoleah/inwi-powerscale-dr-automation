@@ -139,9 +139,12 @@
         # 0 mean "not given" (AWX can send blank answers, and
         # provision_share.yml passes "" for unused DR fields). Separate
         # _names because set_fact cannot override a value passed as an
-        # extra var.
-        _action: "{{ action | default('sync', true) }}"
-        _state: "{{ state | default('present', true) }}"
+        # extra var. Text answers are trimmed - a stray space typed into a
+        # Survey field otherwise breaks paths ("Path must start with '/'").
+        _action: "{{ action | default('sync', true) | string | trim }}"
+        _state: "{{ state | default('present', true) | string | trim }}"
+        _smb_name: "{{ smb_share_name | default('') | string | trim }}"
+        _schedule: "{{ schedule | default('') | string | trim }}"
         _smb_given: "{{ smb_share_name | default('') | string | trim | length > 0 }}"
         _quota_given: "{{ (quota_gb | default(0, true) | int) > 0 }}"
         _schedule_given: "{{ schedule | default('') | string | trim | length > 0 }}"
@@ -177,14 +180,14 @@
   tasks:
     # ---- 1. Read the source's current state ----
     # SMB first: for an SMB-only share, share_path comes from the share.
-    - name: "[source] Capture current SMB share '{{ smb_share_name | default('') }}'"
+    - name: "[source] Capture current SMB share '{{ _smb_name }}'"
       dellemc.powerscale.smb:
         onefs_host: "{{ source_site_obj.onefs_host }}"
         port_no: "{{ source_site_obj.port_no | default(8080) }}"
         verify_ssl: "{{ source_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ source_site_obj.api_user }}"
         api_password: "{{ source_site_obj.api_password }}"
-        share_name: "{{ smb_share_name }}"
+        share_name: "{{ _smb_name }}"
         state: "present"
       register: source_smb
       ignore_errors: true
@@ -193,7 +196,7 @@
     - name: Fail fast if smb_share_name was given but doesn't exist on source
       ansible.builtin.fail:
         msg: >-
-          smb_share_name='{{ smb_share_name }}' was given but no such SMB
+          smb_share_name='{{ _smb_name }}' was given but no such SMB
           share exists on {{ source_site_obj.onefs_host }}.
       when: >-
         (_smb_given | bool) and
@@ -202,15 +205,15 @@
     - name: Resolve share_path (from the SMB share when not given - SMB-only)
       ansible.builtin.set_fact:
         _share_path: >-
-          {{ (share_path | string | trim)
-             if (share_path | default('') | string | trim | length > 0)
-             else source_smb.smb_details.shares[0].path }}
+          {{ ((share_path | string | trim)
+              if (share_path | default('') | string | trim | length > 0)
+              else source_smb.smb_details.shares[0].path) | regex_replace('/+$', '') }}
 
     - name: Fail fast if share_path and the SMB share's path disagree (mixed)
       ansible.builtin.fail:
         msg: >-
           share_path '{{ _share_path }}' does not match SMB share
-          '{{ smb_share_name }}' path '{{ source_smb.smb_details.shares[0].path }}'
+          '{{ _smb_name }}' path '{{ source_smb.smb_details.shares[0].path }}'
           on {{ source_site_obj.onefs_host }} - for a mixed share both must
           point at the same directory.
       when: >-
@@ -219,8 +222,17 @@
 
     - name: Resolve target_path and policy_name
       ansible.builtin.set_fact:
-        _target_path: "{{ target_path | default(_share_path, true) }}"
-        _policy_name: "{{ policy_name | default((_share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication', true) }}"
+        _target_path: "{{ (target_path | default('') | string | trim) or _share_path }}"
+        _policy_name: "{{ (policy_name | default('') | string | trim) or ((_share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
+
+    - name: Validate the source and target paths
+      ansible.builtin.assert:
+        that:
+          - _share_path is match('^/ifs/')
+          - _target_path is match('^/ifs/')
+        fail_msg: >-
+          Paths must start with /ifs/ - got share path '{{ _share_path }}',
+          target path '{{ _target_path }}'.
 
     - name: "[source] Capture current NFS export at {{ _share_path }}"
       dellemc.powerscale.nfs:
@@ -359,7 +371,7 @@
         verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
         api_user: "{{ target_site_obj.api_user }}"
         api_password: "{{ target_site_obj.api_password }}"
-        share_name: "{{ smb_share_name }}"
+        share_name: "{{ _smb_name }}"
         state: "present"
       register: target_smb
       ignore_errors: true
@@ -447,7 +459,7 @@
             verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
-            share_name: "{{ smb_share_name }}"
+            share_name: "{{ _smb_name }}"
             path: "{{ _target_path }}"
             access_zone: "{{ access_zone }}"
             permissions: "{{ _mirror_permissions | default([]) }}"
@@ -460,9 +472,9 @@
         - name: "[target] Report SMB share status"
           ansible.builtin.debug:
             msg: >-
-              {{ "Created a new SMB share '" ~ smb_share_name ~ "' on " ~ target_site_obj.onefs_host ~ ', mirroring source permissions.'
+              {{ "Created a new SMB share '" ~ _smb_name ~ "' on " ~ target_site_obj.onefs_host ~ ', mirroring source permissions.'
                  if (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
-                 else "Target already has an SMB share named '" ~ smb_share_name ~ "' - left as-is (not overwritten)." }}
+                 else "Target already has an SMB share named '" ~ _smb_name ~ "' - left as-is (not overwritten)." }}
           when: (_smb_given | bool) and _state == 'present'
 
         - name: "[target] Create missing quota ({{ quota_gb | default('') }}GB)"
@@ -509,7 +521,7 @@
                  | combine({'password': target_site_obj.synciq_password}
                            if (target_site_obj.synciq_password | default('') | string | length > 0) else {}) }}
             run_job: "{{ 'on-schedule' if (_schedule_given | bool) else 'manual' }}"
-            schedule: "{{ schedule if (_schedule_given | bool) else omit }}"
+            schedule: "{{ _schedule if (_schedule_given | bool) else omit }}"
             rpo_alert: "{{ (rpo_alert_minutes | int) if (_rpo_given | bool) else omit }}"
             rpo_alert_unit: "{{ 'minutes' if (_rpo_given | bool) else omit }}"
             state: "{{ _state }}"
