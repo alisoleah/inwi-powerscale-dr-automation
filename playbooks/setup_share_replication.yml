@@ -409,6 +409,11 @@
         state: "present"
       check_mode: true
       register: target_quota
+      # A brand-new DR path doesn't exist yet: 'Path not found' means
+      # 'no quota there yet', not an error. Anything else still fails.
+      failed_when: >-
+        (target_quota.failed | default(false)) and
+        ('not found' not in (target_quota.msg | default('') | lower))
       when: (_quota_given | bool)
 
     - name: "[policy] Check whether this policy already exists"

@@ -215,6 +215,11 @@
             state: "present"
           check_mode: true
           register: quota_target_before
+          # A brand-new DR path doesn't exist yet: 'Path not found' means
+          # 'no quota there yet', not an error. Anything else still fails.
+          failed_when: >-
+            (quota_target_before.failed | default(false)) and
+            ('not found' not in (quota_target_before.msg | default('') | lower))
 
         - name: Report if the target quota is missing
           ansible.builtin.debug:
