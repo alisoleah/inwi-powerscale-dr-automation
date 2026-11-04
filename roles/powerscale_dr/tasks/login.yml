@@ -7,18 +7,31 @@
 # Input: dr_site_key (site_a | site_b)
 
 - name: "[{{ dr_site_key }}] Open OneFS API session"
-  ansible.builtin.uri:
-    url: "https://{{ sites[dr_site_key].onefs_host }}:{{ sites[dr_site_key].port_no | default(8080) }}/session/1/session"
-    method: POST
-    validate_certs: "{{ sites[dr_site_key].verify_ssl | default(false) }}"
-    body_format: json
-    body:
-      username: "{{ sites[dr_site_key].api_user }}"
-      password: "{{ sites[dr_site_key].api_password }}"
-      services: ["platform", "namespace"]
-    status_code: [200, 201]
-  register: _dr_login
-  no_log: true
+  block:
+    - name: "[{{ dr_site_key }}] Open OneFS API session"
+      ansible.builtin.uri:
+        url: "https://{{ sites[dr_site_key].onefs_host }}:{{ sites[dr_site_key].port_no | default(8080) }}/session/1/session"
+        method: POST
+        validate_certs: "{{ sites[dr_site_key].verify_ssl | default(false) }}"
+        body_format: json
+        body:
+          username: "{{ sites[dr_site_key].api_user }}"
+          password: "{{ sites[dr_site_key].api_password }}"
+          services: ["platform", "namespace"]
+        status_code: [200, 201]
+      register: _dr_login
+      no_log: true
+  rescue:
+    # The login task stays no_log (its body carries the password); report
+    # only the safe parts of the failure.
+    - name: "[{{ dr_site_key }}] Login failed"
+      ansible.builtin.fail:
+        msg: >-
+          Login to {{ dr_site_key }} ({{ sites[dr_site_key].onefs_host }}) as
+          {{ sites[dr_site_key].api_user }} failed: HTTP {{ _dr_login.status | default('n/a') }}
+          {{ (_dr_login.json.message | default(_dr_login.msg | default(''))) | string | truncate(300) }}.
+          Check the site credential (host, user, password, password expiry)
+          and that port {{ sites[dr_site_key].port_no | default(8080) }} is reachable.
 
 - name: "[{{ dr_site_key }}] Remember session"
   ansible.builtin.set_fact:

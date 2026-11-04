@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  author: alisoleah
+  description: Print a short RESULT block and store it as AWX job artifacts.
+  min_ansible_version: "2.14"
+dependencies: []

@@ -9,6 +9,12 @@
 #      rather than overwriting it - deliberate, conservative default.
 #   2. Creates a real SyncIQ replication policy from source to target.
 #
+# INPUTS: every variable below can come from its Survey field, from the
+# optional "Input (JSON)" field (input_json - one JSON object; a key there
+# wins over the same Survey field), or from extra_vars. They are read as
+# inp.<name> (roles/input_resolver). The outcome is printed as a short
+# RESULT block at the end and saved to job artifacts (roles/run_result).
+#
 # Verified against the real installed dellemc.powerscale 3.10.0 collection
 # (ansible-doc dellemc.powerscale.synciqpolicy) before writing this:
 #   - target_cluster.password is the SyncIQ TARGET password - it must
@@ -54,6 +60,8 @@
 #   that). SyncIQ replicates the directory either way; the protocol
 #   objects found on the source decide what gets mirrored on the target.
 # Optional:
+#   dry_run           true (default) = read both clusters and print the plan,
+#                     create nothing; false = apply
 #   smb_share_name    (see above) mirrors this SMB share (by name) and
 #                     its permissions to the target
 #   quota_gb          if set, also ensures a matching quota (this size)
@@ -117,15 +125,23 @@
       ansible.builtin.import_role:
         name: awx_credential_overlay
 
+    # Inputs come from the Survey fields and/or the "Input (JSON)" field
+    # (JSON wins) - every input below is read as inp.<name>.
+    - name: Resolve inputs (Survey fields and/or Input (JSON))
+      ansible.builtin.import_role:
+        name: input_resolver
+      vars:
+        input_keys: ['source_site', 'target_site', 'share_path', 'smb_share_name', 'quota_gb', 'target_path', 'policy_name', 'schedule', 'action', 'network_pool', 'network_subnet', 'rpo_alert_minutes', 'state', 'access_zone', 'dry_run']
+
     - name: Assert required extra_vars are present and valid
       ansible.builtin.assert:
         that:
-          - source_site is defined
-          - source_site in sites
-          - target_site is defined
-          - target_site in sites
-          - source_site != target_site
-          - (share_path | default('') | length > 0) or (smb_share_name | default('') | length > 0)
+          - inp.source_site is defined
+          - inp.source_site in sites
+          - inp.target_site is defined
+          - inp.target_site in sites
+          - inp.source_site != inp.target_site
+          - (inp.share_path | default('') | length > 0) or (inp.smb_share_name | default('') | length > 0)
         fail_msg: >-
           Required: source_site and target_site (one of
           {{ sites.keys() | join(', ') }}, and different from each other),
@@ -133,22 +149,23 @@
 
     - name: Resolve working variables
       ansible.builtin.set_fact:
-        source_site_obj: "{{ sites[source_site] }}"
-        target_site_obj: "{{ sites[target_site] }}"
+        source_site_obj: "{{ sites[inp.source_site] }}"
+        target_site_obj: "{{ sites[inp.target_site] }}"
         # Internal, normalised copies of the optional inputs. Empty strings /
         # 0 mean "not given" (AWX can send blank answers, and
         # provision_share.yml passes "" for unused DR fields). Separate
         # _names because set_fact cannot override a value passed as an
         # extra var. Text answers are trimmed - a stray space typed into a
         # Survey field otherwise breaks paths ("Path must start with '/'").
-        _action: "{{ action | default('sync', true) | string | trim }}"
-        _state: "{{ state | default('present', true) | string | trim }}"
-        _smb_name: "{{ smb_share_name | default('') | string | trim }}"
-        _schedule: "{{ schedule | default('') | string | trim }}"
-        _smb_given: "{{ smb_share_name | default('') | string | trim | length > 0 }}"
-        _quota_given: "{{ (quota_gb | default(0, true) | int) > 0 }}"
-        _schedule_given: "{{ schedule | default('') | string | trim | length > 0 }}"
-        _rpo_given: "{{ rpo_alert_minutes | default('') | string | trim | length > 0 }}"
+        _action: "{{ inp.action | default('sync', true) | string | trim }}"
+        _state: "{{ inp.state | default('present', true) | string | trim }}"
+        _dry: "{{ inp.dry_run | default(true) | bool }}"
+        _smb_name: "{{ inp.smb_share_name | default('') | string | trim }}"
+        _schedule: "{{ inp.schedule | default('') | string | trim }}"
+        _smb_given: "{{ inp.smb_share_name | default('') | string | trim | length > 0 }}"
+        _quota_given: "{{ (inp.quota_gb | default(0, true) | int) > 0 }}"
+        _schedule_given: "{{ inp.schedule | default('') | string | trim | length > 0 }}"
+        _rpo_given: "{{ inp.rpo_alert_minutes | default('') | string | trim | length > 0 }}"
       no_log: true
 
     - name: Validate action/state
@@ -205,8 +222,8 @@
     - name: Resolve share_path (from the SMB share when not given - SMB-only)
       ansible.builtin.set_fact:
         _share_path: >-
-          {{ ((share_path | string | trim)
-              if (share_path | default('') | string | trim | length > 0)
+          {{ ((inp.share_path | string | trim)
+              if (inp.share_path | default('') | string | trim | length > 0)
               else source_smb.smb_details.shares[0].path) | regex_replace('/+$', '') }}
 
     - name: Fail fast if share_path and the SMB share's path disagree (mixed)
@@ -222,8 +239,8 @@
 
     - name: Resolve target_path and policy_name
       ansible.builtin.set_fact:
-        _target_path: "{{ (target_path | default('') | string | trim) or _share_path }}"
-        _policy_name: "{{ (policy_name | default('') | string | trim) or ((_share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
+        _target_path: "{{ (inp.target_path | default('') | string | trim) or _share_path }}"
+        _policy_name: "{{ (inp.policy_name | default('') | string | trim) or ((_share_path | regex_replace('/+$', '')).split('/') | last ~ '_replication') }}"
 
     - name: Validate the source and target paths
       ansible.builtin.assert:
@@ -300,7 +317,7 @@
 
     - name: Resolve access_zone from the source export
       ansible.builtin.set_fact:
-        access_zone: "{{ source_nfs.NFS_export_details.zone | default(access_zone | default('System'), true) }}"
+        inp: "{{ inp | combine({'access_zone': source_nfs.NFS_export_details.zone | default(inp.access_zone | default('System'), true)}) }}"
 
     # ---- 2. Resolve the SyncIQ source network (optional) ----
     # Order: Survey / extra_vars, then the source site's credential (or
@@ -309,10 +326,10 @@
     - name: Resolve network_pool/network_subnet if both already given
       ansible.builtin.set_fact:
         _network_pool: >-
-          {{ network_pool | default('', true) | string
+          {{ inp.network_pool | default('', true) | string
              or ((source_site_obj.network_pool | default('') | string) | regex_replace('^CHANGE_ME$', '')) }}
         _network_subnet: >-
-          {{ network_subnet | default('', true) | string
+          {{ inp.network_subnet | default('', true) | string
              or ((source_site_obj.network_subnet | default('') | string) | regex_replace('^CHANGE_ME$', '')) }}
 
     - name: Mark the network as resolved when both values are known
@@ -358,7 +375,7 @@
         api_user: "{{ target_site_obj.api_user }}"
         api_password: "{{ target_site_obj.api_password }}"
         path: "{{ _target_path }}"
-        access_zone: "{{ access_zone }}"
+        access_zone: "{{ inp.access_zone }}"
         state: "present"
       check_mode: true
       register: target_nfs
@@ -386,7 +403,7 @@
         api_password: "{{ target_site_obj.api_password }}"
         path: "{{ _target_path }}"
         quota_type: "directory"
-        access_zone: "{{ access_zone }}"
+        access_zone: "{{ inp.access_zone }}"
         state: "present"
       check_mode: true
       register: target_quota
@@ -404,6 +421,44 @@
       register: policy_before
       ignore_errors: true
 
+    # ---- Plan (always printed; a dry run stops here) ----
+    - name: Build the plan
+      ansible.builtin.set_fact:
+        _plan: >-
+          {%- set p = policy_before is succeeded and (policy_before.synciq_policy_details | default({}, true) | length > 0) -%}
+          {%- set t = target_site_obj.onefs_host ~ ':' ~ _target_path -%}
+          {%- set ns = namespace(l=[]) -%}
+          {%- if _state == 'present' -%}
+            {%- set ns.l = ns.l + ['Target directory ' ~ t ~ ': ensure it exists'] -%}
+            {%- if _source_has_nfs | bool -%}
+              {%- set ns.l = ns.l + [('NFS export ' ~ t ~ ': CREATE (clients copied from source)')
+                               if (target_nfs.NFS_export_details | default({}, true) | length == 0)
+                               else ('NFS export ' ~ t ~ ': already exists - left as-is')] -%}
+            {%- endif -%}
+            {%- if _smb_given | bool -%}
+              {%- set ns.l = ns.l + [("SMB share '" ~ _smb_name ~ "' on " ~ target_site_obj.onefs_host ~ ': CREATE (permissions copied from source)')
+                               if (target_smb is failed or target_smb.smb_details.shares | default([]) | length == 0)
+                               else ("SMB share '" ~ _smb_name ~ "' on " ~ target_site_obj.onefs_host ~ ': already exists - left as-is')] -%}
+            {%- endif -%}
+            {%- if _quota_given | bool -%}
+              {%- set ns.l = ns.l + [('Quota ' ~ inp.quota_gb ~ 'GB on ' ~ t ~ ': CREATE')
+                               if (target_quota.quota_details | default({}, true) | length == 0)
+                               else ('Quota on ' ~ t ~ ': already exists - left as-is')] -%}
+            {%- endif -%}
+            {%- set ns.l = ns.l + [("SyncIQ policy '" ~ _policy_name ~ "': " ~ ('already exists - ensure settings' if p else 'CREATE')
+                             ~ ' | ' ~ source_site_obj.onefs_host ~ ':' ~ _share_path ~ ' -> ' ~ t
+                             ~ ' | action ' ~ _action
+                             ~ ' | ' ~ (('schedule "' ~ _schedule ~ '"') if (_schedule_given | bool) else 'manual (no schedule)')
+                             ~ ' | network ' ~ ((_network_pool ~ '/' ~ _network_subnet) if (_network_resolved | bool) else 'any'))] -%}
+          {%- else -%}
+            {%- set ns.l = ns.l + [("SyncIQ policy '" ~ _policy_name ~ "': " ~ ('DELETE' if p else 'does not exist - nothing to remove'))] -%}
+          {%- endif -%}
+          {{ ns.l | to_json }}
+
+    - name: Plan
+      ansible.builtin.debug:
+        msg: "{{ [('DRY RUN - nothing will be changed. Set dry_run to false to apply.' if (_dry | bool) else 'LIVE RUN - applying:')] + (_plan | from_json) }}"
+
     - block:
         # ---- 4. Create missing target objects (never overwrite existing ones) ----
         # The nfs and smartquota modules cannot create a missing directory,
@@ -418,7 +473,7 @@
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
             path: "{{ _target_path }}"
-            access_zone: "{{ access_zone }}"
+            access_zone: "{{ inp.access_zone }}"
             recursive: true
             owner:
               name: "root"
@@ -435,7 +490,7 @@
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
             path: "{{ _target_path }}"
-            access_zone: "{{ access_zone }}"
+            access_zone: "{{ inp.access_zone }}"
             clients: "{{ source_nfs.NFS_export_details.clients | default([]) }}"
             read_only_clients: "{{ source_nfs.NFS_export_details.read_only_clients | default([]) }}"
             read_write_clients: "{{ source_nfs.NFS_export_details.read_write_clients | default([]) }}"
@@ -461,7 +516,7 @@
             api_password: "{{ target_site_obj.api_password }}"
             share_name: "{{ _smb_name }}"
             path: "{{ _target_path }}"
-            access_zone: "{{ access_zone }}"
+            access_zone: "{{ inp.access_zone }}"
             permissions: "{{ _mirror_permissions | default([]) }}"
             state: "present"
           register: target_smb_created
@@ -477,7 +532,7 @@
                  else "Target already has an SMB share named '" ~ _smb_name ~ "' - left as-is (not overwritten)." }}
           when: (_smb_given | bool) and _state == 'present'
 
-        - name: "[target] Create missing quota ({{ quota_gb | default('') }}GB)"
+        - name: "[target] Create missing quota ({{ inp.quota_gb | default('') }}GB)"
           dellemc.powerscale.smartquota:
             onefs_host: "{{ target_site_obj.onefs_host }}"
             port_no: "{{ target_site_obj.port_no | default(8080) }}"
@@ -486,9 +541,9 @@
             api_password: "{{ target_site_obj.api_password }}"
             path: "{{ _target_path }}"
             quota_type: "directory"
-            access_zone: "{{ access_zone }}"
+            access_zone: "{{ inp.access_zone }}"
             quota:
-              hard_limit_size: "{{ quota_gb }}"
+              hard_limit_size: "{{ inp.quota_gb }}"
               cap_unit: "GB"
             state: "present"
           register: target_quota_created
@@ -497,7 +552,7 @@
         - name: "[target] Report quota status"
           ansible.builtin.debug:
             msg: >-
-              {{ 'Created a new ' ~ quota_gb ~ 'GB quota at ' ~ _target_path ~ ' on ' ~ target_site_obj.onefs_host ~ '.'
+              {{ 'Created a new ' ~ inp.quota_gb ~ 'GB quota at ' ~ _target_path ~ ' on ' ~ target_site_obj.onefs_host ~ '.'
                  if (target_quota.quota_details | default({}, true) | length == 0)
                  else 'Target already has a quota at ' ~ _target_path ~ ' - left as-is (not overwritten).' }}
           when: (_quota_given | bool) and _state == 'present'
@@ -522,7 +577,7 @@
                            if (target_site_obj.synciq_password | default('') | string | length > 0) else {}) }}
             run_job: "{{ 'on-schedule' if (_schedule_given | bool) else 'manual' }}"
             schedule: "{{ _schedule if (_schedule_given | bool) else omit }}"
-            rpo_alert: "{{ (rpo_alert_minutes | int) if (_rpo_given | bool) else omit }}"
+            rpo_alert: "{{ (inp.rpo_alert_minutes | int) if (_rpo_given | bool) else omit }}"
             rpo_alert_unit: "{{ 'minutes' if (_rpo_given | bool) else omit }}"
             state: "{{ _state }}"
           register: policy_change
@@ -559,9 +614,27 @@
               Any target export/share/quota created earlier in this run were NOT
               automatically removed (idempotent-safe to leave in place) - check
               {{ target_site_obj.onefs_host }} manually if needed.
-      when: _state == 'present' or (policy_before is succeeded and (policy_before.synciq_policy_details | default({}, true) | length > 0))
+      when:
+        - not (_dry | bool)
+        - _state == 'present' or (policy_before is succeeded and (policy_before.synciq_policy_details | default({}, true) | length > 0))
 
     - name: Nothing to do - policy doesn't exist and state=absent
       ansible.builtin.debug:
         msg: "Policy '{{ _policy_name }}' does not exist - nothing to remove."
-      when: _state == 'absent' and (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
+      when: not (_dry | bool) and _state == 'absent' and (policy_before is failed or (policy_before.synciq_policy_details | default({}, true) | length == 0))
+
+    - name: RESULT
+      ansible.builtin.include_role:
+        name: run_result
+      vars:
+        result_title: "Setup Share Replication - {{ inp.source_site }}:{{ _share_path }} -> {{ inp.target_site }}:{{ _target_path }}"
+        result_status: >-
+          {{ 'DRY RUN' if (_dry | bool)
+             else ('CHANGED' if ((target_dir.changed | default(false)) or (target_nfs_created.changed | default(false))
+                                 or (target_smb_created.changed | default(false)) or (target_quota_created.changed | default(false))
+                                 or (policy_change.changed | default(false)))
+                   else 'NO CHANGE') }}
+        result_lines: >-
+          {{ (_plan | from_json)
+             + ([] if (_dry | bool)
+                else ["Policy '" ~ _policy_name ~ "': " ~ ('CHANGED' if (policy_change.changed | default(false)) else 'already in desired state')]) }}

@@ -237,6 +237,34 @@
         site: "{{ sites[primary_site] }}"
         share_dry_run: "{{ _dry_run }}"
 
+    - name: RESULT
+      ansible.builtin.include_role:
+        name: run_result
+      vars:
+        _host: "{{ primary_site }} ({{ sites[primary_site].onefs_host }})"
+        result_title: "Provision Share - {{ _share.name }} ({{ _protocols | join(' + ') | upper }}) at {{ _share.path }} on {{ primary_site }}"
+        result_status: >-
+          {{ 'DRY RUN' if (_dry_run | bool)
+             else ('CHANGED' if ((fs_result.changed | default(false)) or (nfs_result.changed | default(false)) or (smb_result.changed | default(false)))
+                   else 'NO CHANGE') }}
+        result_lines: >-
+          {%- set w = 'would ensure' if (_dry_run | bool) else '' -%}
+          {%- set ns = namespace(l=[]) -%}
+          {%- set ns.l = ns.l + [_host ~ ': directory ' ~ _share.path
+                                 ~ ((' + ' ~ _share.quota_gb ~ 'GB quota') if _share.quota_gb is defined else '')
+                                 ~ ' - ' ~ (w if w else ('CREATED/UPDATED' if (fs_result.changed | default(false)) else 'already there'))] -%}
+          {%- if 'nfs' in _protocols -%}
+            {%- set ns.l = ns.l + [_host ~ ': NFS export ' ~ _share.path ~ ' (clients ' ~ ((_share.nfs_clients + _share.nfs_read_only_clients + _share.nfs_read_write_clients + _share.nfs_root_clients) | join(', ')) ~ ') - '
+                                   ~ (w if w else ('CREATED/UPDATED' if (nfs_result.changed | default(false)) else 'already there'))] -%}
+          {%- endif -%}
+          {%- if 'smb' in _protocols -%}
+            {%- set ns.l = ns.l + [_host ~ ": SMB share '" ~ _share.name ~ "' (" ~ (_share.smb_permission_labels | join(', ')) ~ ') - '
+                                   ~ (w if w else ('CREATED/UPDATED' if (smb_result.changed | default(false)) else 'already there'))] -%}
+          {%- endif -%}
+          {%- set ns.l = ns.l + [('DR: replication to ' ~ _dr_site ~ (' - skipped in dry run' if (_dry_run | bool) else ' - see the Setup Share Replication RESULT below'))
+                                 if (_dr_site | length > 0) else 'DR: not requested'] -%}
+          {{ ns.l | to_json }}
+
 # Optional DR step: reuses setup_share_replication.yml as-is. Only runs when
 # dr_site is set and this is not a dry run. Empty strings for its optional
 # inputs mean "not given" (that playbook normalises them).

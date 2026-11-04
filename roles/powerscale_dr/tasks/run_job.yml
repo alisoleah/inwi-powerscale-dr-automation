@@ -32,7 +32,7 @@
     status_code: [200, 404]
   register: _dr_job_poll
   until: _dr_job_poll.status == 404 or (_dr_job_poll.json.jobs | default([]) | length == 0)
-  retries: "{{ (dr_job_timeout_minutes | default(60, true) | int) * 6 }}"
+  retries: "{{ (inp.dr_job_timeout_minutes | default(60, true) | int) * 6 }}"
   delay: 10
 
 - name: "[{{ job_site }}] Check sync report for {{ job_policy }}"

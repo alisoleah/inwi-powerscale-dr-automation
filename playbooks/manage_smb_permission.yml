@@ -4,6 +4,12 @@
 # sites.yml edits needed. Idempotent, with automatic rollback of the
 # share's full permission list if anything fails after the change.
 #
+# INPUTS: every variable below can come from its Survey field, from the
+# optional "Input (JSON)" field (input_json - one JSON object; a key there
+# wins over the same Survey field), or from extra_vars. They are read as
+# inp.<name> (roles/input_resolver). The outcome is printed as a short
+# RESULT block at the end and saved to job artifacts (roles/run_result).
+#
 # Verified against the real installed dellemc.powerscale 3.10.0 collection
 # (ansible-doc dellemc.powerscale.smb) before writing this - in particular:
 #   - UNLIKE nfs's client_state, this module has no per-entry add/remove
@@ -96,38 +102,47 @@
       ansible.builtin.import_role:
         name: awx_credential_overlay
 
+    # Inputs come from the Survey fields and/or the "Input (JSON)" field
+    # (JSON wins) - every input below is read as inp.<name>.
+    - name: Resolve inputs (Survey fields and/or Input (JSON))
+      ansible.builtin.import_role:
+        name: input_resolver
+      vars:
+        input_keys: ['target_site', 'share_name', 'trustee_type', 'trustee_name', 'permission', 'state', 'permission_type', 'provider_type', 'access_zone', 'apply_to_target']
+
     - name: Assert required extra_vars are present and valid
       ansible.builtin.assert:
         that:
-          - target_site is defined
-          - target_site in sites
-          - share_name is defined
-          - share_name | length > 0
-          - trustee_type is defined
-          - trustee_type in ['user', 'group', 'wellknown']
-          - trustee_name is defined
-          - trustee_name | length > 0
-          - permission is defined
-          - permission in ['read', 'write', 'full']
-          - state is defined
-          - state in ['present', 'absent']
+          - inp.target_site is defined
+          - inp.target_site in sites
+          - inp.share_name is defined
+          - inp.share_name | length > 0
+          - inp.trustee_type is defined
+          - inp.trustee_type in ['user', 'group', 'wellknown']
+          - inp.trustee_name is defined
+          - inp.trustee_name | length > 0
+          - inp.permission is defined
+          - inp.permission in ['read', 'write', 'full']
+          - inp.state is defined
+          - inp.state in ['present', 'absent']
         fail_msg: >-
           Required: target_site (one of {{ sites.keys() | join(', ') }}),
           share_name, trustee_type (user|group|wellknown), trustee_name,
           permission (read|write|full), state (present|absent).
 
+    - name: Apply input defaults
+      ansible.builtin.set_fact:
+        inp: "{{ inp | combine({'permission_type': inp.permission_type | default('allow') , 'provider_type': inp.provider_type | default('local') , 'access_zone': inp.access_zone | default('System') }) }}"
+
     - name: Resolve working variables
       ansible.builtin.set_fact:
-        site: "{{ sites[target_site] }}"
-        permission_type: "{{ permission_type | default('allow') }}"
-        provider_type: "{{ provider_type | default('local') }}"
-        access_zone: "{{ access_zone | default('System') }}"
+        site: "{{ sites[inp.target_site] }}"
       no_log: true
 
     - name: Validate permission_type
       ansible.builtin.assert:
         that:
-          - permission_type in ['allow', 'deny']
+          - inp.permission_type in ['allow', 'deny']
         fail_msg: "permission_type must be one of: allow, deny"
 
     - name: Fail fast if the target site still has CHANGE_ME / missing fields
@@ -142,7 +157,7 @@
           - site.api_password | length > 0
           - site.api_password != "CHANGE_ME"
         fail_msg: >-
-          Site '{{ target_site }}' is missing required connection fields or
+          Site '{{ inp.target_site }}' is missing required connection fields or
           still has a CHANGE_ME placeholder - check sites.yml / the
           attached AWX Credential.
       no_log: true
@@ -161,8 +176,8 @@
         verify_ssl: "{{ site.verify_ssl | default(false) }}"
         api_user: "{{ site.api_user }}"
         api_password: "{{ site.api_password }}"
-        share_name: "{{ share_name }}"
-        access_zone: "{{ access_zone }}"
+        share_name: "{{ inp.share_name }}"
+        access_zone: "{{ inp.access_zone }}"
         state: "present"
       register: smb_before
       ignore_errors: true
@@ -170,7 +185,7 @@
     - name: Fail fast if the share doesn't exist (or another error occurred)
       ansible.builtin.fail:
         msg: >-
-          Could not read SMB share '{{ share_name }}' on {{ site.onefs_host }} -
+          Could not read SMB share '{{ inp.share_name }}' on {{ site.onefs_host }} -
           it may not exist (this playbook only edits an EXISTING share's
           permissions, it does not create new shares - use
           provision_share.yml for that), or another error occurred:
@@ -186,7 +201,7 @@
     - name: Reset permissions accumulator (loops accumulate across runs otherwise - see smb.yml's known bug this project already fixed once)
       ansible.builtin.set_fact:
         _current_permissions: []
-        _perm_api: "{{ 'change' if permission == 'write' else permission }}"
+        _perm_api: "{{ 'change' if inp.permission == 'write' else inp.permission }}"
 
     - name: Capture current permissions in REST API shape (used for revoke + rollback)
       ansible.builtin.set_fact:
@@ -201,7 +216,7 @@
         loop_var: perm_item
         label: "{{ perm_item.trustee.name }}"
 
-    - name: "[{{ share_name }}] Current permissions (before)"
+    - name: "[{{ inp.share_name }}] Current permissions (before)"
       ansible.builtin.debug:
         msg: "{{ _current_permissions | map(attribute='trustee.name') | zip(_current_permissions | map(attribute='trustee.type'), _current_permissions | map(attribute='permission_type'), _current_permissions | map(attribute='permission')) | map('join', ' ') | list }}"
 
@@ -220,10 +235,10 @@
         loop_var: perm_item
         label: "{{ perm_item.trustee.name }}"
       when: >-
-        not (perm_item.trustee.type == trustee_type
-             and (perm_item.trustee.name | lower) == (trustee_name | lower)
+        not (perm_item.trustee.type == inp.trustee_type
+             and (perm_item.trustee.name | lower) == (inp.trustee_name | lower)
              and perm_item.permission == _perm_api
-             and perm_item.permission_type == permission_type)
+             and perm_item.permission_type == inp.permission_type)
 
     - name: Check whether the target entry already exists as specified
       ansible.builtin.set_fact:
@@ -232,20 +247,20 @@
     - name: No change needed - report and skip
       ansible.builtin.debug:
         msg: >-
-          {{ share_name }}: {{ trustee_name }} ({{ trustee_type }}, {{ permission }}/{{ permission_type }})
-          is already {{ 'present' if state == 'present' else 'absent' }} - no change needed.
-      when: (state == 'present' and (_entry_already_present | bool)) or (state == 'absent' and not (_entry_already_present | bool))
+          {{ inp.share_name }}: {{ inp.trustee_name }} ({{ inp.trustee_type }}, {{ inp.permission }}/{{ inp.permission_type }})
+          is already {{ 'present' if inp.state == 'present' else 'absent' }} - no change needed.
+      when: (inp.state == 'present' and (_entry_already_present | bool)) or (inp.state == 'absent' and not (_entry_already_present | bool))
 
     - name: Resolve what to do on the source
       ansible.builtin.set_fact:
         _source_action: >-
-          {{ 'add' if (state == 'present' and not (_entry_already_present | bool))
-             else 'remove' if (state == 'absent' and (_entry_already_present | bool))
+          {{ 'add' if (inp.state == 'present' and not (_entry_already_present | bool))
+             else 'remove' if (inp.state == 'absent' and (_entry_already_present | bool))
              else 'none' }}
 
     - name: Resolve apply_to_target
       ansible.builtin.set_fact:
-        _apply_req: "{{ apply_to_target | default(false) | bool }}"
+        _apply_req: "{{ inp.apply_to_target | default(false) | bool }}"
 
     - name: Check for a real replication target, if requested
       ansible.builtin.include_role:
@@ -281,8 +296,8 @@
             verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
-            share_name: "{{ share_name }}"
-            access_zone: "{{ access_zone }}"
+            share_name: "{{ inp.share_name }}"
+            access_zone: "{{ inp.access_zone }}"
             state: "present"
           register: smb_target_before
           ignore_errors: true
@@ -290,7 +305,7 @@
         - name: Report if the target share is missing
           ansible.builtin.debug:
             msg: >-
-              No SMB share named '{{ share_name }}' found on
+              No SMB share named '{{ inp.share_name }}' found on
               {{ target_site_obj.onefs_host }} (the replication target) -
               applying to source only.
           when: >-
@@ -338,10 +353,10 @@
         label: "{{ perm_item.trustee.name }}"
       when: >-
         (_apply_to_target_effective | bool) and
-        not (perm_item.trustee.type == trustee_type
-             and (perm_item.trustee.name | lower) == (trustee_name | lower)
+        not (perm_item.trustee.type == inp.trustee_type
+             and (perm_item.trustee.name | lower) == (inp.trustee_name | lower)
              and perm_item.permission == _perm_api
-             and perm_item.permission_type == permission_type)
+             and perm_item.permission_type == inp.permission_type)
 
     - name: Check whether the target already has this entry as specified
       ansible.builtin.set_fact:
@@ -351,18 +366,18 @@
     - name: Target already matches desired state - report and skip target change
       ansible.builtin.debug:
         msg: >-
-          {{ replication_target_path | default(share_name) }} ({{ target_site_obj.onefs_host | default('') }}):
-          {{ trustee_name }} is already {{ 'present' if state == 'present' else 'absent' }} - no target change needed.
+          {{ replication_target_path | default(inp.share_name) }} ({{ target_site_obj.onefs_host | default('') }}):
+          {{ inp.trustee_name }} is already {{ 'present' if inp.state == 'present' else 'absent' }} - no target change needed.
       when: >-
         (_apply_to_target_effective | bool) and
-        ((state == 'present' and (_target_entry_already_present | bool)) or (state == 'absent' and not (_target_entry_already_present | bool)))
+        ((inp.state == 'present' and (_target_entry_already_present | bool)) or (inp.state == 'absent' and not (_target_entry_already_present | bool)))
 
     - name: Resolve what to do on the target
       ansible.builtin.set_fact:
         _target_action: >-
           {{ 'none' if not (_apply_to_target_effective | bool)
-             else 'add' if (state == 'present' and not (_target_entry_already_present | bool))
-             else 'remove' if (state == 'absent' and (_target_entry_already_present | bool))
+             else 'add' if (inp.state == 'present' and not (_target_entry_already_present | bool))
+             else 'remove' if (inp.state == 'absent' and (_target_entry_already_present | bool))
              else 'none' }}
 
     # OneFS REST auth: session, not HTTP basic. Basic auth to PAPI is
@@ -370,34 +385,54 @@
     # PAPI") - the dellemc SDK itself logs in via /session/1/session and
     # sends the isisessid cookie + X-CSRF-Token + Origin on every call, so
     # the REST writes below do the same. Only logged in when a write is due.
-    - name: "[source] Open OneFS API session (for REST revoke/rollback)"
-      ansible.builtin.uri:
-        url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/session/1/session"
-        method: POST
-        validate_certs: "{{ site.verify_ssl | default(false) }}"
-        body_format: json
-        body:
-          username: "{{ site.api_user }}"
-          password: "{{ site.api_password }}"
-          services: ["platform"]
-        status_code: [200, 201]
-      register: _src_session
-      no_log: true
+    - name: "[source] Open OneFS API session"
+      block:
+        - name: "[source] Open OneFS API session (for REST revoke/rollback)"
+          ansible.builtin.uri:
+            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/session/1/session"
+            method: POST
+            validate_certs: "{{ site.verify_ssl | default(false) }}"
+            body_format: json
+            body:
+              username: "{{ site.api_user }}"
+              password: "{{ site.api_password }}"
+              services: ["platform"]
+            status_code: [200, 201]
+          register: _src_session
+          no_log: true
+      rescue:
+        - name: "[source] Login failed"
+          ansible.builtin.fail:
+            msg: >-
+              Login to {{ site.onefs_host }} as {{ site.api_user }} failed:
+              HTTP {{ _src_session.status | default('n/a') }}
+              {{ (_src_session.json.message | default(_src_session.msg | default(''))) | string | truncate(300) }}.
+              Check the site credential (password, expiry) and port 8080.
       when: _source_action != 'none'
 
-    - name: "[target] Open OneFS API session (for REST revoke/rollback)"
-      ansible.builtin.uri:
-        url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/session/1/session"
-        method: POST
-        validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
-        body_format: json
-        body:
-          username: "{{ target_site_obj.api_user }}"
-          password: "{{ target_site_obj.api_password }}"
-          services: ["platform"]
-        status_code: [200, 201]
-      register: _tgt_session
-      no_log: true
+    - name: "[target] Open OneFS API session"
+      block:
+        - name: "[target] Open OneFS API session (for REST revoke/rollback)"
+          ansible.builtin.uri:
+            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/session/1/session"
+            method: POST
+            validate_certs: "{{ target_site_obj.verify_ssl | default(false) }}"
+            body_format: json
+            body:
+              username: "{{ target_site_obj.api_user }}"
+              password: "{{ target_site_obj.api_password }}"
+              services: ["platform"]
+            status_code: [200, 201]
+          register: _tgt_session
+          no_log: true
+      rescue:
+        - name: "[target] Login failed"
+          ansible.builtin.fail:
+            msg: >-
+              Login to {{ target_site_obj.onefs_host }} as {{ target_site_obj.api_user }} failed:
+              HTTP {{ _tgt_session.status | default('n/a') }}
+              {{ (_tgt_session.json.message | default(_tgt_session.msg | default(''))) | string | truncate(300) }}.
+              Check the site credential (password, expiry) and port 8080.
       when: _target_action != 'none'
 
     # Write paths:
@@ -414,27 +449,27 @@
     #   rollback -> REST PUT of the original list, for the same reason (a
     #             module-based rollback could never undo an add).
     - block:
-        - name: "[{{ share_name }}] (source) Add {{ trustee_name }}"
+        - name: "[{{ inp.share_name }}] (source) Add {{ inp.trustee_name }}"
           dellemc.powerscale.smb:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
             verify_ssl: "{{ site.verify_ssl | default(false) }}"
             api_user: "{{ site.api_user }}"
             api_password: "{{ site.api_password }}"
-            share_name: "{{ share_name }}"
-            access_zone: "{{ access_zone }}"
+            share_name: "{{ inp.share_name }}"
+            access_zone: "{{ inp.access_zone }}"
             permissions:
-              - "{{ ({'user_name': trustee_name} if trustee_type == 'user'
-                     else {'group_name': trustee_name} if trustee_type == 'group'
-                     else {'wellknown': trustee_name})
-                    | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
+              - "{{ ({'user_name': inp.trustee_name} if inp.trustee_type == 'user'
+                     else {'group_name': inp.trustee_name} if inp.trustee_type == 'group'
+                     else {'wellknown': inp.trustee_name})
+                    | combine({'permission': inp.permission, 'permission_type': inp.permission_type, 'provider_type': inp.provider_type}) }}"
             state: "present"
           register: smb_add
           when: _source_action == 'add'
 
-        - name: "[{{ share_name }}] (source) Remove {{ trustee_name }}"
+        - name: "[{{ inp.share_name }}] (source) Remove {{ inp.trustee_name }}"
           ansible.builtin.uri:
-            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ inp.share_name | urlencode }}?zone={{ inp.access_zone | urlencode }}"
             method: PUT
             headers:
               Cookie: "isisessid={{ _src_session.cookies.isisessid }}"
@@ -450,35 +485,35 @@
           no_log: true
           when: _source_action == 'remove'
 
-        - name: "[{{ share_name }}] Source result"
+        - name: "[{{ inp.share_name }}] Source result"
           ansible.builtin.debug:
             msg: >-
-              {{ trustee_name }} {{ 'added to' if _source_action == 'add' else 'removed from' }}
-              {{ share_name }}'s permissions -
+              {{ inp.trustee_name }} {{ 'added to' if _source_action == 'add' else 'removed from' }}
+              {{ inp.share_name }}'s permissions -
               {{ 'changed' if (smb_add is changed or smb_remove is changed) else 'already in desired state, no change' }}.
           when: _source_action != 'none'
 
-        - name: "[{{ share_name }}] (target) Add {{ trustee_name }}"
+        - name: "[{{ inp.share_name }}] (target) Add {{ inp.trustee_name }}"
           dellemc.powerscale.smb:
             onefs_host: "{{ target_site_obj.onefs_host }}"
             port_no: "{{ target_site_obj.port_no | default(8080) }}"
             verify_ssl: "{{ target_site_obj.verify_ssl | default(false) }}"
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
-            share_name: "{{ share_name }}"
-            access_zone: "{{ access_zone }}"
+            share_name: "{{ inp.share_name }}"
+            access_zone: "{{ inp.access_zone }}"
             permissions:
-              - "{{ ({'user_name': trustee_name} if trustee_type == 'user'
-                     else {'group_name': trustee_name} if trustee_type == 'group'
-                     else {'wellknown': trustee_name})
-                    | combine({'permission': permission, 'permission_type': permission_type, 'provider_type': provider_type}) }}"
+              - "{{ ({'user_name': inp.trustee_name} if inp.trustee_type == 'user'
+                     else {'group_name': inp.trustee_name} if inp.trustee_type == 'group'
+                     else {'wellknown': inp.trustee_name})
+                    | combine({'permission': inp.permission, 'permission_type': inp.permission_type, 'provider_type': inp.provider_type}) }}"
             state: "present"
           register: smb_target_add
           when: _target_action == 'add'
 
-        - name: "[{{ share_name }}] (target) Remove {{ trustee_name }}"
+        - name: "[{{ inp.share_name }}] (target) Remove {{ inp.trustee_name }}"
           ansible.builtin.uri:
-            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ inp.share_name | urlencode }}?zone={{ inp.access_zone | urlencode }}"
             method: PUT
             headers:
               Cookie: "isisessid={{ _tgt_session.cookies.isisessid }}"
@@ -494,18 +529,18 @@
           no_log: true
           when: _target_action == 'remove'
 
-        - name: "[{{ share_name }}] Target result"
+        - name: "[{{ inp.share_name }}] Target result"
           ansible.builtin.debug:
             msg: >-
-              {{ trustee_name }} {{ 'added to' if _target_action == 'add' else 'removed from' }}
-              {{ share_name }}'s permissions on {{ target_site_obj.onefs_host }} -
+              {{ inp.trustee_name }} {{ 'added to' if _target_action == 'add' else 'removed from' }}
+              {{ inp.share_name }}'s permissions on {{ target_site_obj.onefs_host }} -
               {{ 'changed' if (smb_target_add is changed or smb_target_remove is changed) else 'already in desired state, no change' }}.
           when: _target_action != 'none'
 
       rescue:
-        - name: "ROLLBACK [{{ share_name }}] (source) - restore original permission list"
+        - name: "ROLLBACK [{{ inp.share_name }}] (source) - restore original permission list"
           ansible.builtin.uri:
-            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            url: "https://{{ site.onefs_host }}:{{ site.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ inp.share_name | urlencode }}?zone={{ inp.access_zone | urlencode }}"
             method: PUT
             headers:
               Cookie: "isisessid={{ _src_session.cookies.isisessid }}"
@@ -521,9 +556,9 @@
           no_log: true
           when: _source_action != 'none'
 
-        - name: "ROLLBACK [{{ share_name }}] (target) - restore original permission list"
+        - name: "ROLLBACK [{{ inp.share_name }}] (target) - restore original permission list"
           ansible.builtin.uri:
-            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ share_name | urlencode }}?zone={{ access_zone | urlencode }}"
+            url: "https://{{ target_site_obj.onefs_host }}:{{ target_site_obj.port_no | default(8080) }}/platform/1/protocols/smb/shares/{{ inp.share_name | urlencode }}?zone={{ inp.access_zone | urlencode }}"
             method: PUT
             headers:
               Cookie: "isisessid={{ _tgt_session.cookies.isisessid }}"
@@ -542,7 +577,7 @@
         - name: Fail the play - report rollback outcome
           ansible.builtin.fail:
             msg: >-
-              The permission change on {{ share_name }} failed. Source rollback
+              The permission change on {{ inp.share_name }} failed. Source rollback
               {{ 'succeeded' if not (rollback_source_result.failed | default(false))
                  else 'ALSO FAILED - manual verification/intervention needed' }}.
               {{ ('Target rollback ' ~ ('succeeded' if not (rollback_target_result.failed | default(false)) else 'ALSO FAILED - manual verification/intervention needed') ~ '.')
@@ -568,3 +603,19 @@
           ignore_errors: true
           no_log: true
       when: _source_action != 'none' or _target_action != 'none'
+
+    - name: RESULT
+      ansible.builtin.include_role:
+        name: run_result
+      vars:
+        result_title: "Manage SMB Permission - {{ inp.target_site }} share {{ inp.share_name }}"
+        result_status: "{{ 'CHANGED' if (smb_add.changed | default(false)) or (smb_remove.changed | default(false)) or (smb_target_add.changed | default(false)) or (smb_target_remove.changed | default(false)) else 'NO CHANGE' }}"
+        result_lines:
+          - "{{ inp.target_site }} ({{ site.onefs_host }}): {{ inp.trustee_type }} {{ inp.trustee_name }} {{ inp.permission }}/{{ inp.permission_type }} {{ 'granted' if inp.state == 'present' else 'revoked' }} - {{ 'CHANGED' if (smb_add.changed | default(false)) or (smb_remove.changed | default(false)) else 'no change needed' }}"
+          - "{{ (('DR ' ~ target_site_obj.onefs_host ~ ' ' ~ (replication_target_path | default('')) ~ ': ' ~ ('CHANGED' if ((smb_target_add if (smb_target_add.changed | default(false)) else smb_target_remove).changed | default(false)) else 'no change needed'))
+                if (_apply_to_target_effective | default(false) | bool)
+                else ('DR target: not changed - '
+                      ~ ('no SyncIQ policy covers this path' if not (replication_found | default(false) | bool)
+                         else ('policy target is not a site in sites.yml' if (replication_target_site | default('')) == ''
+                               else 'no matching object on the target'))
+                      if (_apply_req | default(false) | bool) else 'DR target: not requested')) }}"

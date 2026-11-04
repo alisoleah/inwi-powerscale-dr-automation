@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  author: alisoleah
+  description: Resolve playbook inputs from an optional 'Input (JSON)' field plus Survey fields (JSON wins).
+  min_ansible_version: "2.14"
+dependencies: []

@@ -1,0 +1,69 @@
+---
+# Builds ONE resolved input dict, `inp`, from two sources:
+#   1. input_json  - optional JSON object (string from the "Input (JSON)"
+#                    Survey field, or a dict when passed as extra vars)
+#   2. the individual variables (Survey fields / extra vars / play vars)
+# For each name in input_keys: a non-empty value in input_json WINS, else a
+# non-empty individual variable, else the key is left out of `inp` (so
+# `inp.x | default(...)` and `inp.x is defined` work as usual).
+# Strings are trimmed; "" counts as not given (AWX sends blank Survey
+# fields as "").
+#
+# Why a separate dict: AWX passes Survey answers as extra vars, the
+# highest Ansible precedence - nothing can overwrite them, so "JSON wins"
+# is only possible by reading every input from `inp`.
+#
+# Input: input_keys - list of variable names this playbook accepts.
+
+- name: Parse Input (JSON)
+  block:
+    - name: Parse Input (JSON)
+      ansible.builtin.set_fact:
+        _input_json_parsed: >-
+          {{ input_json
+             if ((input_json | default('')) is mapping)
+             else (((input_json | default('') | string | trim) | from_json)
+                   if (input_json | default('') | string | trim | length > 0) else {}) }}
+  rescue:
+    - name: Input (JSON) is not valid JSON
+      ansible.builtin.fail:
+        msg: >-
+          Input (JSON) is not valid JSON. Use double quotes for keys and
+          text, e.g. {"target_site": "site_a", "state": "present"}.
+          Received: {{ input_json | default('') | string | truncate(200) }}
+
+- name: Fail if Input (JSON) is not a JSON object
+  ansible.builtin.assert:
+    that:
+      - _input_json_parsed is mapping
+      - (_input_json_parsed.keys() | list | difference(input_keys) | length) == 0
+    fail_msg: >-
+      Input (JSON) must be a JSON object using only these keys:
+      {{ input_keys | join(', ') }}.
+      Unknown keys: {{ (_input_json_parsed.keys() | list | difference(input_keys)) if _input_json_parsed is mapping else 'not an object' }}
+
+- name: Resolve inputs (JSON wins over Survey fields)
+  ansible.builtin.set_fact:
+    _inp_json: >-
+      {%- set ns = namespace(d={}) -%}
+      {%- for k in input_keys -%}
+        {%- set j = _input_json_parsed.get(k) -%}
+        {%- set v = lookup('ansible.builtin.vars', k, default='__not_given__') -%}
+        {%- set v = none if v == '__not_given__' else v -%}
+        {%- set j = (j | string | trim) if (j is string) else j -%}
+        {%- set v = (v | string | trim) if (v is string) else v -%}
+        {%- if j is not none and (j | string) != '' -%}
+          {%- set ns.d = ns.d | combine({k: j}) -%}
+        {%- elif v is not none and (v | string) != '' -%}
+          {%- set ns.d = ns.d | combine({k: v}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.d | to_json }}
+
+- name: Store resolved inputs
+  ansible.builtin.set_fact:
+    inp: "{{ _inp_json | from_json }}"
+
+- name: Inputs used for this run
+  ansible.builtin.debug:
+    msg: "{{ inp | dict2items | rejectattr('key', 'search', 'password') | items2dict }}"

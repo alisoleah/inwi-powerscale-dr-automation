@@ -1,0 +1,28 @@
+---
+# Prints the run's outcome as ONE short block named "RESULT" (the last
+# thing in the job output) and stores the same summary as job artifacts
+# (AWX: job Details -> Artifacts; API: /api/v2/jobs/<id>/ "artifacts").
+#
+# Inputs:
+#   result_title  one line, e.g. "Manage NFS Client - site_a /ifs/data/x"
+#   result_status DRY RUN | CHANGED | NO CHANGE | DONE | PASSED ...
+#   result_lines  list of short lines, one per object / step
+
+- name: Normalise result lines
+  ansible.builtin.set_fact:
+    _result_lines: >-
+      {{ (result_lines | from_json) if (result_lines is string) else (result_lines | list) }}
+    _result_status: "{{ result_status | string | trim }}"
+
+- name: RESULT
+  ansible.builtin.debug:
+    msg: "{{ ['[' ~ _result_status ~ '] ' ~ result_title] + _result_lines }}"
+
+- name: Save the result as job artifacts
+  ansible.builtin.set_stats:
+    data:
+      result:
+        title: "{{ result_title }}"
+        status: "{{ _result_status }}"
+        details: "{{ _result_lines }}"
+    per_host: false

@@ -437,6 +437,7 @@
         name: "PowerScale - Manage NFS Client"
         description: |-
           Adds/removes one or more clients (comma-separated) on an EXISTING NFS export; absent removes only those clients, never the export.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (add):
           {"target_site": "site_a", "export_path": "/ifs/data/finance", "client_ip": "10.20.0.5", "state": "present"}
           Example extra_vars (remove from read-only list, mirror to DR target):
@@ -457,7 +458,7 @@
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Export path"
               question_description: >-
                 Must be an EXISTING NFS export, e.g. /ifs/data/finance.
@@ -465,7 +466,7 @@
                 create new exports.
               variable: "export_path"
               type: "text"
-              required: true
+              required: false
             - question_name: "Client(s) - IP, CIDR or hostname"
               question_description: >-
                 One or more, comma-separated, e.g. 10.20.0.5 or
@@ -473,13 +474,13 @@
                 only these clients from the chosen list - never the export.
               variable: "client_ip"
               type: "text"
-              required: true
+              required: false
             - question_name: "Action"
               question_description: "Add or remove this client."
               variable: "state"
               type: "multiplechoice"
               choices: "present\nabsent"
-              required: true
+              required: false
             - question_name: "Client list (optional)"
               question_description: >-
                 Which client list to edit. Defaults to 'clients' if left
@@ -505,6 +506,16 @@
               choices: "false\ntrue"
               default: "false"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
@@ -514,6 +525,7 @@
         name: "PowerScale - Manage SMB Permission"
         description: |-
           Grants/revokes one permission entry on an EXISTING SMB share.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (grant):
           {"target_site": "site_a", "share_name": "finance_data", "trustee_type": "group", "trustee_name": "INWI\\finance_team", "permission": "write", "provider_type": "ads", "state": "present"}
           Example extra_vars (revoke):
@@ -534,37 +546,37 @@
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "SMB share name"
               question_description: >-
                 Must be an EXISTING SMB share. This template edits
                 permissions - it does not create new shares.
               variable: "share_name"
               type: "text"
-              required: true
+              required: false
             - question_name: "Trustee type"
               variable: "trustee_type"
               type: "multiplechoice"
               choices: "user\ngroup\nwellknown"
-              required: true
+              required: false
             - question_name: "Trustee name"
               question_description: >-
                 e.g. INWI\\finance_team for a group, or 'everyone' for
                 wellknown.
               variable: "trustee_name"
               type: "text"
-              required: true
+              required: false
             - question_name: "Permission"
               variable: "permission"
               type: "multiplechoice"
               choices: "read\nwrite\nfull"
-              required: true
+              required: false
             - question_name: "Action"
               question_description: "Grant or revoke this permission."
               variable: "state"
               type: "multiplechoice"
               choices: "present\nabsent"
-              required: true
+              required: false
             - question_name: "Permission type (optional)"
               question_description: "Defaults to 'allow' if left blank."
               variable: "permission_type"
@@ -597,6 +609,16 @@
               choices: "false\ntrue"
               default: "false"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
@@ -606,6 +628,7 @@
         name: "PowerScale - Manage Quota"
         description: |-
           Resizes the hard limit of an EXISTING quota.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars:
           {"target_site": "site_a", "quota_path": "/ifs/data/finance", "new_quota_gb": 10}
           Optional: quota_type (default directory), access_zone, apply_to_target
@@ -625,7 +648,7 @@
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Quota path"
               question_description: >-
                 Must have an EXISTING quota, e.g. /ifs/data/finance. This
@@ -633,11 +656,11 @@
                 not create new quotas.
               variable: "quota_path"
               type: "text"
-              required: true
+              required: false
             - question_name: "New hard limit (GB)"
               variable: "new_quota_gb"
               type: "integer"
-              required: true
+              required: false
             - question_name: "Quota type (optional)"
               question_description: "Defaults to 'directory' if left blank."
               variable: "quota_type"
@@ -661,6 +684,16 @@
               choices: "false\ntrue"
               default: "false"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ [site_a_credential_name, site_b_credential_name] if attach_site_credentials else [] }}
         state: present
@@ -669,7 +702,8 @@
       awx.awx.job_template:
         name: "PowerScale - Setup Share Replication"
         description: |-
-          Creates a real SyncIQ policy for an EXISTING share and mirrors export/share/quota onto the target (only if missing).
+          Creates a real SyncIQ policy for an EXISTING share and mirrors export/share/quota onto the target (only if missing). Dry run (default) only prints the plan.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (NFS only):
           {"source_site": "site_a", "target_site": "site_b", "share_path": "/ifs/data/finance", "schedule": "every 4 hours"}
           Example extra_vars (SMB only - path taken from the share):
@@ -688,17 +722,27 @@
           name: ""
           description: ""
           spec:
+            - question_name: "Dry run?"
+              question_description: >-
+                true (default): read both clusters and print the plan only -
+                nothing is created. false: create the target objects and
+                the SyncIQ policy.
+              variable: "dry_run"
+              type: "multiplechoice"
+              choices: "true\nfalse"
+              default: "true"
+              required: false
             - question_name: "Source site"
               variable: "source_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Target site"
               question_description: "Must differ from the source site."
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Share path (source) - NFS / mixed"
               question_description: >-
                 Path of an EXISTING NFS export on the source, e.g.
@@ -780,6 +824,16 @@
               choices: "present\nabsent"
               default: "present"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([synciq_credential_name] if (synciq_credential_name | default('') | length > 0) else []) }}
@@ -797,6 +851,7 @@
         name: "PowerScale - DR Failover (One Policy)"
         description: |-
           Planned SyncIQ failover: preflight, fence source, final sync, allow_write on the DR cluster; optional NFS client remount.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (dry run):
           {"source_site": "site_a", "target_site": "site_b", "policy_name": "finance_replication", "dry_run": "true"}
           Example extra_vars (live, with client remount):
@@ -819,20 +874,20 @@
               variable: "source_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Target site (DR)"
               question_description: >-
                 Must differ from the source site.
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Policy name"
               question_description: >-
                 SyncIQ policy name as it exists on the source (current primary), e.g. finance_replication.
               variable: "policy_name"
               type: "text"
-              required: true
+              required: false
             - question_name: "Dry run?"
               question_description: >-
                 true (default): preflight + plan only, nothing changed.
@@ -873,6 +928,16 @@
               variable: "dr_job_timeout_minutes"
               type: "integer"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
@@ -883,6 +948,7 @@
         name: "PowerScale - DR Failover (Policy List)"
         description: |-
           Planned SyncIQ failover: preflight, fence source, final sync, allow_write on the DR cluster; optional NFS client remount.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (dry run):
           {"source_site": "site_a", "target_site": "site_b", "policy_names": "finance_replication, hr_replication", "dry_run": "true"}
           Example extra_vars (live, with client remount):
@@ -905,20 +971,20 @@
               variable: "source_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Target site (DR)"
               question_description: >-
                 Must differ from the source site.
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Policy names (comma-separated)"
               question_description: >-
                 e.g. finance_replication, hr_replication
               variable: "policy_names"
               type: "text"
-              required: true
+              required: false
             - question_name: "Dry run?"
               question_description: >-
                 true (default): preflight + plan only, nothing changed.
@@ -959,6 +1025,16 @@
               variable: "dr_job_timeout_minutes"
               type: "integer"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
@@ -969,6 +1045,7 @@
         name: "PowerScale - DR Failover (Whole Site)"
         description: |-
           Planned SyncIQ failover: preflight, fence source, final sync, allow_write on the DR cluster; optional NFS client remount.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (dry run):
           {"source_site": "site_a", "target_site": "site_b", "target_host_aliases": "", "dry_run": "true"}
           Example extra_vars (live, with client remount):
@@ -991,14 +1068,14 @@
               variable: "source_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Target site (DR)"
               question_description: >-
                 Must differ from the source site.
               variable: "target_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Target host aliases (optional)"
               question_description: >-
                 Comma-separated names the policies may use for the DR cluster (e.g. its SmartConnect name), in addition to the site credential's OneFS host. Every policy targeting one of these is included.
@@ -1045,6 +1122,16 @@
               variable: "dr_job_timeout_minutes"
               type: "integer"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
@@ -1055,6 +1142,7 @@
         name: "PowerScale - DR Failback (One Policy)"
         description: |-
           SyncIQ failback (resync-prep): copy DR changes back, make the primary writable, restore the original direction, un-fence; optional NFS client remount. Re-run to resume.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (dry run):
           {"primary_site": "site_a", "dr_site": "site_b", "policy_name": "finance_replication", "dry_run": "true"}
           Example extra_vars (live, with client remount):
@@ -1077,20 +1165,20 @@
               variable: "primary_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "DR site (currently serving)"
               question_description: >-
                 Must differ from the primary site.
               variable: "dr_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Policy name"
               question_description: >-
                 SyncIQ policy name as it exists on the original primary, e.g. finance_replication.
               variable: "policy_name"
               type: "text"
-              required: true
+              required: false
             - question_name: "Dry run?"
               question_description: >-
                 true (default): preflight + plan only, nothing changed.
@@ -1131,6 +1219,16 @@
               variable: "dr_job_timeout_minutes"
               type: "integer"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
@@ -1141,6 +1239,7 @@
         name: "PowerScale - DR Failback (Policy List)"
         description: |-
           SyncIQ failback (resync-prep): copy DR changes back, make the primary writable, restore the original direction, un-fence; optional NFS client remount. Re-run to resume.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (dry run):
           {"primary_site": "site_a", "dr_site": "site_b", "policy_names": "finance_replication, hr_replication", "dry_run": "true"}
           Example extra_vars (live, with client remount):
@@ -1163,20 +1262,20 @@
               variable: "primary_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "DR site (currently serving)"
               question_description: >-
                 Must differ from the primary site.
               variable: "dr_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Policy names (comma-separated)"
               question_description: >-
                 e.g. finance_replication, hr_replication
               variable: "policy_names"
               type: "text"
-              required: true
+              required: false
             - question_name: "Dry run?"
               question_description: >-
                 true (default): preflight + plan only, nothing changed.
@@ -1217,6 +1316,16 @@
               variable: "dr_job_timeout_minutes"
               type: "integer"
               required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
+              required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])
              + ([client_ssh_credential_name] if (client_ssh_credential_name | default('') | length > 0) else []) }}
@@ -1227,6 +1336,7 @@
         name: "PowerScale - DR Failback (Whole Site)"
         description: |-
           SyncIQ failback (resync-prep): copy DR changes back, make the primary writable, restore the original direction, un-fence; optional NFS client remount. Re-run to resume.
+          Inputs: fill in the Survey fields, or paste the example JSON into the last field "Input (JSON)" (JSON wins). The outcome is the RESULT block at the end of the output and in Details -> Artifacts.
           Example extra_vars (dry run):
           {"primary_site": "site_a", "dr_site": "site_b", "target_host_aliases": "", "dry_run": "true"}
           Example extra_vars (live, with client remount):
@@ -1249,14 +1359,14 @@
               variable: "primary_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "DR site (currently serving)"
               question_description: >-
                 Must differ from the primary site.
               variable: "dr_site"
               type: "multiplechoice"
               choices: "site_a\nsite_b"
-              required: true
+              required: false
             - question_name: "Target host aliases (optional)"
               question_description: >-
                 Comma-separated names the policies may use for the DR cluster (e.g. its SmartConnect name), in addition to the site credential's OneFS host. Every policy targeting one of these is included.
@@ -1302,6 +1412,16 @@
                 Per SyncIQ job. Defaults to 60.
               variable: "dr_job_timeout_minutes"
               type: "integer"
+              required: false
+            - question_name: "Input (JSON) - optional, overrides the fields above"
+              question_description: >-
+                Paste all inputs as one JSON object instead of (or on top of)
+                the fields above, e.g. the "Example extra_vars" from this
+                template's description. A key given here wins over the same
+                field above; fields left blank above are ignored. Leave
+                empty to use the fields only.
+              variable: "input_json"
+              type: "textarea"
               required: false
         credentials: >-
           {{ ([site_a_credential_name, site_b_credential_name] if attach_site_credentials else [])

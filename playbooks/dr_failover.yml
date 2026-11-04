@@ -2,6 +2,12 @@
 # PLANNED SyncIQ failover: move one, several, or all policies from the
 # current primary (source_site) to the DR cluster (target_site).
 #
+# INPUTS: every variable below can come from its Survey field, from the
+# optional "Input (JSON)" field (input_json - one JSON object; a key there
+# wins over the same Survey field), or from extra_vars. They are read as
+# inp.<name> (roles/input_resolver). The outcome is printed as a short
+# RESULT block at the end and saved to job artifacts (roles/run_result).
+#
 # Per policy, in order:
 #   1. preflight  - policy exists on source, is enabled, targets target_site,
 #                   no job running; target side not already writes_enabled
@@ -56,29 +62,37 @@
       ansible.builtin.import_role:
         name: awx_credential_overlay
 
+    # Inputs come from the Survey fields and/or the "Input (JSON)" field
+    # (JSON wins) - every input below is read as inp.<name>.
+    - name: Resolve inputs (Survey fields and/or Input (JSON))
+      ansible.builtin.import_role:
+        name: input_resolver
+      vars:
+        input_keys: ['dr_scope', 'source_site', 'target_site', 'policy_name', 'policy_names', 'target_host_aliases', 'dry_run', 'fence_source', 'access_zone', 'nfs_client_mounts', 'client_nfs_server', 'dr_job_timeout_minutes', 'dr_client_become']
+
     - name: Resolve inputs
       ansible.builtin.set_fact:
-        _dr_scope: "{{ dr_scope | default('list') }}"
-        _dr_dry: "{{ dry_run | default(true) | bool }}"
-        _dr_fence: "{{ fence_source | default(true) | bool }}"
-        _dr_zone: "{{ access_zone | default('System', true) }}"
+        _dr_scope: "{{ inp.dr_scope | default('list') }}"
+        _dr_dry: "{{ inp.dry_run | default(true) | bool }}"
+        _dr_fence: "{{ inp.fence_source | default(true) | bool }}"
+        _dr_zone: "{{ inp.access_zone | default('System', true) }}"
         _dr_names: >-
-          {{ ([policy_name | default('') | string | trim] if (dr_scope | default('list')) == 'one'
-              else (policy_names | default('') | string).split(','))
+          {{ ([inp.policy_name | default('') | string | trim] if (inp.dr_scope | default('list')) == 'one'
+              else (inp.policy_names | default('') | string).split(','))
              | map('trim') | reject('equalto', '') | unique | list }}
-        _dr_aliases: "{{ (target_host_aliases | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
-        _dr_mounts_raw: "{{ (nfs_client_mounts | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _dr_aliases: "{{ (inp.target_host_aliases | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
+        _dr_mounts_raw: "{{ (inp.nfs_client_mounts | default('') | string).split(',') | map('trim') | reject('equalto', '') | list }}"
 
     - name: Validate inputs
       ansible.builtin.assert:
         that:
           - _dr_scope in ['one', 'list', 'site']
-          - source_site is defined and source_site in sites
-          - target_site is defined and target_site in sites
-          - source_site != target_site
+          - inp.source_site is defined and inp.source_site in sites
+          - inp.target_site is defined and inp.target_site in sites
+          - inp.source_site != inp.target_site
           - _dr_scope == 'site' or (_dr_names | length > 0)
           - _dr_mounts_raw | reject('match', '^[A-Za-z0-9._-]+:/\\S*$') | list | length == 0
-          - (_dr_mounts_raw | length == 0) or (client_nfs_server | default('') | string | trim | length > 0)
+          - (_dr_mounts_raw | length == 0) or (inp.client_nfs_server | default('') | string | trim | length > 0)
         fail_msg: >-
           Need source_site and target_site ({{ sites.keys() | join(' | ') }}, different),
           and {{ 'policy_name' if _dr_scope == 'one' else 'policy_names (comma-separated)' if _dr_scope == 'list' else '' }}.
@@ -93,7 +107,7 @@
           - sites[item].api_password | default('') | length > 0
           - sites[item].api_password != 'CHANGE_ME'
         fail_msg: "Site '{{ item }}' is missing connection fields or still has CHANGE_ME - check the attached AWX credential."
-      loop: ["{{ source_site }}", "{{ target_site }}"]
+      loop: ["{{ inp.source_site }}", "{{ inp.target_site }}"]
       no_log: true
 
   tasks:
@@ -103,22 +117,22 @@
         tasks_from: login.yml
       vars:
         dr_site_key: "{{ item }}"
-      loop: ["{{ source_site }}", "{{ target_site }}"]
+      loop: ["{{ inp.source_site }}", "{{ inp.target_site }}"]
 
     # ---- Resolve the policy list ----
-    - name: "[{{ source_site }}] List SyncIQ policies"
+    - name: "[{{ inp.source_site }}] List SyncIQ policies"
       ansible.builtin.uri:
-        url: "{{ _dr_api[source_site].base }}/platform/1/sync/policies"
-        headers: "{{ _dr_api[source_site].headers }}"
-        validate_certs: "{{ _dr_api[source_site].validate_certs }}"
+        url: "{{ _dr_api[inp.source_site].base }}/platform/1/sync/policies"
+        headers: "{{ _dr_api[inp.source_site].headers }}"
+        validate_certs: "{{ _dr_api[inp.source_site].validate_certs }}"
       register: _dr_src_policies
 
     - name: Resolve the policies in scope
       ansible.builtin.set_fact:
-        _dr_target_hosts: "{{ [sites[target_site].onefs_host] + _dr_aliases }}"
+        _dr_target_hosts: "{{ [sites[inp.target_site].onefs_host] + _dr_aliases }}"
         _dr_in_scope: >-
           {{ (_dr_src_policies.json.policies
-              | selectattr('target_host', 'in', [sites[target_site].onefs_host] + _dr_aliases)
+              | selectattr('target_host', 'in', [sites[inp.target_site].onefs_host] + _dr_aliases)
               | selectattr('enabled')
               | rejectattr('name', 'match', '.*_mirror$') | list)
              if _dr_scope == 'site'
@@ -127,7 +141,7 @@
     - name: Fail if requested policies don't exist on the source
       ansible.builtin.fail:
         msg: >-
-          Not found on {{ source_site }} ({{ sites[source_site].onefs_host }}):
+          Not found on {{ inp.source_site }} ({{ sites[inp.source_site].onefs_host }}):
           {{ _dr_names | difference(_dr_in_scope | map(attribute='name') | list) | join(', ') }}.
           Policies there: {{ _dr_src_policies.json.policies | map(attribute='name') | join(', ') }}
       when: _dr_scope != 'site' and (_dr_names | difference(_dr_in_scope | map(attribute='name') | list) | length > 0)
@@ -135,27 +149,27 @@
     - name: Fail if no policy is in scope
       ansible.builtin.fail:
         msg: >-
-          No SyncIQ policy on {{ source_site }} targets {{ _dr_target_hosts | join(' / ') }}.
+          No SyncIQ policy on {{ inp.source_site }} targets {{ _dr_target_hosts | join(' / ') }}.
           Add the name the policies use as target_host to target_host_aliases.
       when: _dr_in_scope | length == 0
 
     # ---- Preflight ----
-    - name: "[{{ target_site }}] Read target-side state of each policy"
+    - name: "[{{ inp.target_site }}] Read target-side state of each policy"
       ansible.builtin.uri:
-        url: "{{ _dr_api[target_site].base }}/platform/1/sync/target/policies/{{ item.name | urlencode }}"
-        headers: "{{ _dr_api[target_site].headers }}"
-        validate_certs: "{{ _dr_api[target_site].validate_certs }}"
+        url: "{{ _dr_api[inp.target_site].base }}/platform/1/sync/target/policies/{{ item.name | urlencode }}"
+        headers: "{{ _dr_api[inp.target_site].headers }}"
+        validate_certs: "{{ _dr_api[inp.target_site].validate_certs }}"
         status_code: [200, 404]
       loop: "{{ _dr_in_scope }}"
       loop_control:
         label: "{{ item.name }}"
       register: _dr_tgt_states
 
-    - name: "[{{ source_site }}] Check for running jobs"
+    - name: "[{{ inp.source_site }}] Check for running jobs"
       ansible.builtin.uri:
-        url: "{{ _dr_api[source_site].base }}/platform/1/sync/jobs/{{ item.name | urlencode }}"
-        headers: "{{ _dr_api[source_site].headers }}"
-        validate_certs: "{{ _dr_api[source_site].validate_certs }}"
+        url: "{{ _dr_api[inp.source_site].base }}/platform/1/sync/jobs/{{ item.name | urlencode }}"
+        headers: "{{ _dr_api[inp.source_site].headers }}"
+        validate_certs: "{{ _dr_api[inp.source_site].validate_certs }}"
         status_code: [200, 404]
       loop: "{{ _dr_in_scope }}"
       loop_control:
@@ -172,7 +186,7 @@
             {%- set tstate = (t.json.policies[0].failover_failback_state if t.status == 200 else 'no target record') -%}
             {%- set running = r.status == 200 and (r.json.jobs | default([]) | length > 0) -%}
             {%- set problems = [] -%}
-            {%- if p.target_host not in _dr_target_hosts -%}{%- set problems = problems + ['targets ' ~ p.target_host ~ ', not ' ~ target_site] -%}{%- endif -%}
+            {%- if p.target_host not in _dr_target_hosts -%}{%- set problems = problems + ['targets ' ~ p.target_host ~ ', not ' ~ inp.target_site] -%}{%- endif -%}
             {%- if running -%}{%- set problems = problems + ['a job is running'] -%}{%- endif -%}
             {%- if t.status != 200 -%}{%- set problems = problems + ['never synced to the target'] -%}{%- endif -%}
             {%- set out.l = out.l + [{
@@ -203,11 +217,11 @@
       ansible.builtin.debug:
         msg:
           - "{{ 'DRY RUN - nothing will be changed. Set dry_run: false to fail over.' if _dr_dry else 'LIVE RUN - failing over.' }}"
-          - "{{ source_site }} ({{ sites[source_site].onefs_host }}) -> {{ target_site }} ({{ sites[target_site].onefs_host }})"
+          - "{{ inp.source_site }} ({{ sites[inp.source_site].onefs_host }}) -> {{ inp.target_site }} ({{ sites[inp.target_site].onefs_host }})"
           - "Fail over: {{ (_dr_preflight | from_json) | rejectattr('skip') | map(attribute='name') | join(', ') or '(none)' }}"
           - "Already failed over (skipped): {{ (_dr_preflight | from_json) | selectattr('skip') | map(attribute='name') | join(', ') or '(none)' }}"
           - "Steps per policy: {{ 'fence source, ' if _dr_fence else '' }}final sync, allow_write on target"
-          - "NFS clients to remount to {{ client_nfs_server | default('-') }}: {{ _dr_mounts_raw | join(', ') or '(none)' }}"
+          - "NFS clients to remount to {{ inp.client_nfs_server | default('-') }}: {{ _dr_mounts_raw | join(', ') or '(none)' }}"
 
     # ---- Execute ----
     - name: Fail over each policy
@@ -249,9 +263,37 @@
   gather_facts: false
   vars:
     dr_direction_map: "{{ hostvars['localhost']['_dr_path_map'] }}"
-    dr_new_server: "{{ client_nfs_server }}"
+    # inp is a fact of localhost (play 1); this play runs on the clients.
+    dr_new_server: "{{ hostvars['localhost'].inp.client_nfs_server }}"
+    dr_client_become: "{{ hostvars['localhost'].inp.dr_client_become | default(false) }}"
   tasks:
     - name: Remount
       ansible.builtin.include_role:
         name: powerscale_dr
         tasks_from: remount.yml
+
+- name: RESULT
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: RESULT
+      ansible.builtin.include_role:
+        name: run_result
+      vars:
+        result_title: "DR Failover - {{ inp.source_site }} -> {{ inp.target_site }} ({{ inp.dr_scope | default('list') }})"
+        result_status: >-
+          {{ 'DRY RUN' if (_dr_dry | bool)
+             else ('DONE' if ((_dr_preflight | from_json) | rejectattr('skip') | list | length > 0) else 'NOTHING TO DO') }}
+        result_lines: >-
+          {%- set ns = namespace(l=[]) -%}
+          {%- for r in (_dr_preflight | from_json) -%}
+            {%- set ns.l = ns.l + [r.name ~ ': ' ~ ('already failed over - skipped' if r.skip else ('would fail over (' ~ ('fence source, ' if (_dr_fence | bool) else '') ~ 'final sync, allow writes on ' ~ inp.target_site ~ ')' if (_dr_dry | bool) else 'FAILED OVER - ' ~ inp.target_site ~ ':' ~ r.target_path ~ ' writable' ~ (', source fenced read-only' if (_dr_fence | bool) else '')))] -%}
+          {%- endfor -%}
+          {%- for h in groups['dr_nfs_clients'] | default([]) -%}
+            {%- for m in (hostvars[h]._dr_remounts | default('[]') | from_json) -%}
+              {%- set ns.l = ns.l + ['client ' ~ h ~ ' ' ~ m.line] -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {%- if (_dr_mounts_raw | length) == 0 -%}{%- set ns.l = ns.l + ['NFS clients: none to remount'] -%}{%- endif -%}
+          {{ ns.l | to_json }}

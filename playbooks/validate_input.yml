@@ -8,3 +8,16 @@
   roles:
     - awx_credential_overlay
     - validate_input
+
+  post_tasks:
+    - name: RESULT
+      ansible.builtin.include_role:
+        name: run_result
+      vars:
+        result_title: "Validate Input - {{ target_site | default('all') }}"
+        result_status: PASSED
+        result_lines: >-
+          {{ active_sites | dict2items
+             | map(attribute='key')
+             | map('regex_replace', '^(.*)$', '\1: connection fields complete (no cluster contacted)')
+             | list }}

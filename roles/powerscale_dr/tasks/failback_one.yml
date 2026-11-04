@@ -12,87 +12,87 @@
 
 - name: "[{{ dr_policy.name }}] Failback"
   block:
-    - name: "[{{ dr_policy.name }}] 1. resync_prep on {{ primary_site }} (creates {{ dr_policy.name }}_mirror)"
+    - name: "[{{ dr_policy.name }}] 1. resync_prep on {{ inp.primary_site }} (creates {{ dr_policy.name }}_mirror)"
       ansible.builtin.include_tasks: run_job.yml
       vars:
-        job_site: "{{ primary_site }}"
+        job_site: "{{ inp.primary_site }}"
         job_policy: "{{ dr_policy.name }}"
         job_action: resync_prep
         job_wait: mirror_created
-        mirror_site: "{{ dr_site }}"
+        mirror_site: "{{ inp.dr_site }}"
       when: not (dr_policy.resync_done | bool)
 
     - name: "[{{ dr_policy.name }}] 2. Fence the DR path"
       ansible.builtin.include_tasks: fence.yml
       vars:
-        fence_site: "{{ dr_site }}"
+        fence_site: "{{ inp.dr_site }}"
         fence_path: "{{ dr_policy.target_path }}"
         fence_name: "{{ dr_policy.name }}_mirror"
         fence_zone: "{{ _dr_zone }}"
       when: _dr_fence | bool
 
-    - name: "[{{ dr_policy.name }}] 3. Sync {{ dr_policy.name }}_mirror ({{ dr_site }} -> {{ primary_site }})"
+    - name: "[{{ dr_policy.name }}] 3. Sync {{ dr_policy.name }}_mirror ({{ inp.dr_site }} -> {{ inp.primary_site }})"
       ansible.builtin.include_tasks: run_job.yml
       vars:
-        job_site: "{{ dr_site }}"
+        job_site: "{{ inp.dr_site }}"
         job_policy: "{{ dr_policy.name }}_mirror"
         job_action: ""
         job_wait: sync_report
       when: not ((dr_policy.resync_done | bool) and dr_policy.mirror_target_state == 'writes_enabled')
 
-    - name: "[{{ dr_policy.name }}] 4. allow_write on {{ primary_site }}"
+    - name: "[{{ dr_policy.name }}] 4. allow_write on {{ inp.primary_site }}"
       ansible.builtin.include_tasks: run_job.yml
       vars:
-        job_site: "{{ primary_site }}"
+        job_site: "{{ inp.primary_site }}"
         job_policy: "{{ dr_policy.name }}_mirror"
         job_action: allow_write
         job_wait: writes_enabled
       when: not ((dr_policy.resync_done | bool) and dr_policy.mirror_target_state == 'writes_enabled')
 
-    - name: "[{{ dr_policy.name }}] 5. resync_prep on {{ dr_site }} (restores {{ primary_site }} -> {{ dr_site }})"
+    - name: "[{{ dr_policy.name }}] 5. resync_prep on {{ inp.dr_site }} (restores {{ inp.primary_site }} -> {{ inp.dr_site }})"
       ansible.builtin.include_tasks: run_job.yml
       vars:
-        job_site: "{{ dr_site }}"
+        job_site: "{{ inp.dr_site }}"
         job_policy: "{{ dr_policy.name }}_mirror"
         job_action: resync_prep
         job_wait: sync_report
 
-    - name: "[{{ dr_policy.name }}] 6a. Read {{ dr_policy.name }} on {{ primary_site }}"
+    - name: "[{{ dr_policy.name }}] 6a. Read {{ dr_policy.name }} on {{ inp.primary_site }}"
       ansible.builtin.uri:
-        url: "{{ _dr_api[primary_site].base }}/platform/1/sync/policies/{{ dr_policy.name | urlencode }}"
-        headers: "{{ _dr_api[primary_site].headers }}"
-        validate_certs: "{{ _dr_api[primary_site].validate_certs }}"
+        url: "{{ _dr_api[inp.primary_site].base }}/platform/1/sync/policies/{{ dr_policy.name | urlencode }}"
+        headers: "{{ _dr_api[inp.primary_site].headers }}"
+        validate_certs: "{{ _dr_api[inp.primary_site].validate_certs }}"
       register: _dr_p_after
 
-    - name: "[{{ dr_policy.name }}] 6b. Re-enable {{ dr_policy.name }} on {{ primary_site }}"
+    - name: "[{{ dr_policy.name }}] 6b. Re-enable {{ dr_policy.name }} on {{ inp.primary_site }}"
       ansible.builtin.uri:
-        url: "{{ _dr_api[primary_site].base }}/platform/1/sync/policies/{{ dr_policy.name | urlencode }}"
+        url: "{{ _dr_api[inp.primary_site].base }}/platform/1/sync/policies/{{ dr_policy.name | urlencode }}"
         method: PUT
-        headers: "{{ _dr_api[primary_site].headers }}"
-        validate_certs: "{{ _dr_api[primary_site].validate_certs }}"
+        headers: "{{ _dr_api[inp.primary_site].headers }}"
+        validate_certs: "{{ _dr_api[inp.primary_site].validate_certs }}"
         body_format: json
         body: {"enabled": true}
         status_code: [200, 204]
       when: not (_dr_p_after.json.policies[0].enabled | bool)
       changed_when: true
 
-    - name: "[{{ dr_policy.name }}] 6c. Un-fence {{ primary_site }}"
+    - name: "[{{ dr_policy.name }}] 6c. Un-fence {{ inp.primary_site }}"
       ansible.builtin.include_tasks: unfence.yml
       vars:
-        fence_site: "{{ primary_site }}"
+        fence_site: "{{ inp.primary_site }}"
         fence_name: "{{ dr_policy.name }}"
 
-    - name: "[{{ dr_policy.name }}] 6d. Un-fence {{ dr_site }}"
+    - name: "[{{ dr_policy.name }}] 6d. Un-fence {{ inp.dr_site }}"
       ansible.builtin.include_tasks: unfence.yml
       vars:
-        fence_site: "{{ dr_site }}"
+        fence_site: "{{ inp.dr_site }}"
         fence_name: "{{ dr_policy.name }}_mirror"
 
     - name: "[{{ dr_policy.name }}] Failed back"
       ansible.builtin.debug:
         msg: >-
-          {{ dr_policy.name }}: {{ primary_site }}:{{ dr_policy.source_path }} is primary again
-          (replicating to {{ dr_site }}:{{ dr_policy.target_path }}); DR changes were copied back.
+          {{ dr_policy.name }}: {{ inp.primary_site }}:{{ dr_policy.source_path }} is primary again
+          (replicating to {{ inp.dr_site }}:{{ dr_policy.target_path }}); DR changes were copied back.
 
   rescue:
     - name: "[{{ dr_policy.name }}] Failback failed"

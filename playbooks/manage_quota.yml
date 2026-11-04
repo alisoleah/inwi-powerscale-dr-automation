@@ -4,6 +4,12 @@
 # (no-op if the requested size already matches), with automatic rollback
 # to the original size if anything fails after the change.
 #
+# INPUTS: every variable below can come from its Survey field, from the
+# optional "Input (JSON)" field (input_json - one JSON object; a key there
+# wins over the same Survey field), or from extra_vars. They are read as
+# inp.<name> (roles/input_resolver). The outcome is printed as a short
+# RESULT block at the end and saved to job artifacts (roles/run_result).
+#
 # Verified against the real installed dellemc.powerscale 3.10.0 collection
 # (ansible-doc dellemc.powerscale.smartquota) before writing this - in
 # particular:
@@ -62,30 +68,40 @@
       ansible.builtin.import_role:
         name: awx_credential_overlay
 
+    # Inputs come from the Survey fields and/or the "Input (JSON)" field
+    # (JSON wins) - every input below is read as inp.<name>.
+    - name: Resolve inputs (Survey fields and/or Input (JSON))
+      ansible.builtin.import_role:
+        name: input_resolver
+      vars:
+        input_keys: ['target_site', 'quota_path', 'new_quota_gb', 'quota_type', 'access_zone', 'apply_to_target']
+
     - name: Assert required extra_vars are present and valid
       ansible.builtin.assert:
         that:
-          - target_site is defined
-          - target_site in sites
-          - quota_path is defined
-          - quota_path | length > 0
-          - new_quota_gb is defined
-          - new_quota_gb | int > 0
+          - inp.target_site is defined
+          - inp.target_site in sites
+          - inp.quota_path is defined
+          - inp.quota_path | length > 0
+          - inp.new_quota_gb is defined
+          - inp.new_quota_gb | int > 0
         fail_msg: >-
           Required: target_site (one of {{ sites.keys() | join(', ') }}),
           quota_path, new_quota_gb (positive integer, GB).
 
+    - name: Apply input defaults
+      ansible.builtin.set_fact:
+        inp: "{{ inp | combine({'quota_type': inp.quota_type | default('directory') , 'access_zone': inp.access_zone | default('System') }) }}"
+
     - name: Resolve working variables
       ansible.builtin.set_fact:
-        site: "{{ sites[target_site] }}"
-        quota_type: "{{ quota_type | default('directory') }}"
-        access_zone: "{{ access_zone | default('System') }}"
+        site: "{{ sites[inp.target_site] }}"
       no_log: true
 
     - name: Validate quota_type
       ansible.builtin.assert:
         that:
-          - quota_type in ['user', 'group', 'directory', 'default-user', 'default-group', 'default-directory']
+          - inp.quota_type in ['user', 'group', 'directory', 'default-user', 'default-group', 'default-directory']
         fail_msg: >-
           quota_type must be one of: user, group, directory, default-user,
           default-group, default-directory.
@@ -102,7 +118,7 @@
           - site.api_password | length > 0
           - site.api_password != "CHANGE_ME"
         fail_msg: >-
-          Site '{{ target_site }}' is missing required connection fields or
+          Site '{{ inp.target_site }}' is missing required connection fields or
           still has a CHANGE_ME placeholder - check sites.yml / the
           attached AWX Credential.
       no_log: true
@@ -119,9 +135,9 @@
         verify_ssl: "{{ site.verify_ssl | default(false) }}"
         api_user: "{{ site.api_user }}"
         api_password: "{{ site.api_password }}"
-        path: "{{ quota_path }}"
-        quota_type: "{{ quota_type }}"
-        access_zone: "{{ access_zone }}"
+        path: "{{ inp.quota_path }}"
+        quota_type: "{{ inp.quota_type }}"
+        access_zone: "{{ inp.access_zone }}"
         state: "present"
       check_mode: true
       register: quota_before
@@ -132,7 +148,7 @@
     - name: Fail fast if no quota exists yet at this path
       ansible.builtin.fail:
         msg: >-
-          No existing {{ quota_type }} quota found at '{{ quota_path }}' on
+          No existing {{ inp.quota_type }} quota found at '{{ inp.quota_path }}' on
           {{ site.onefs_host }} - this playbook only edits an EXISTING
           quota's hard limit, it does not create new quotas (use
           provision_share.yml for that).
@@ -143,43 +159,43 @@
         _original_hard_limit_gb: >-
           {{ (quota_before.quota_details.thresholds.hard | default(0) | int) / (1024 ** 3) }}
 
-    - name: "[{{ quota_path }}] Current hard limit (before)"
+    - name: "[{{ inp.quota_path }}] Current hard limit (before)"
       ansible.builtin.debug:
         msg: "{{ _original_hard_limit_gb }} GB"
 
     - name: No change needed - report and skip
       ansible.builtin.debug:
         msg: >-
-          {{ quota_path }}: hard limit is already {{ new_quota_gb }}GB - no change needed.
-      when: (_original_hard_limit_gb | float | round(2)) == (new_quota_gb | int | round(2))
+          {{ inp.quota_path }}: hard limit is already {{ inp.new_quota_gb }}GB - no change needed.
+      when: (_original_hard_limit_gb | float | round(2)) == (inp.new_quota_gb | int | round(2))
 
     - name: Resolve apply_to_target
       ansible.builtin.set_fact:
-        apply_to_target: "{{ apply_to_target | default(false) | bool }}"
-      when: (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
+        inp: "{{ inp | combine({'apply_to_target': inp.apply_to_target | default(false) | bool}) }}"
+      when: (_original_hard_limit_gb | float | round(2)) != (inp.new_quota_gb | int | round(2))
 
     - name: Check for a real replication target, if requested
       ansible.builtin.include_role:
         name: resolve_replication_target
       vars:
-        source_path: "{{ quota_path }}"
-      when: apply_to_target | default(false) and (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
+        source_path: "{{ inp.quota_path }}"
+      when: inp.apply_to_target | default(false) and (_original_hard_limit_gb | float | round(2)) != (inp.new_quota_gb | int | round(2))
 
     - name: Report replication discovery result
       ansible.builtin.debug:
         msg: >-
-          {{ 'No SyncIQ policy covers ' ~ quota_path ~ ' on ' ~ site.onefs_host ~ ' - applying to source only.'
+          {{ 'No SyncIQ policy covers ' ~ inp.quota_path ~ ' on ' ~ site.onefs_host ~ ' - applying to source only.'
              if not (replication_found | default(false))
              else ('Replication target is ' ~ replication_target_site ~ ', but that site is not defined in sites.yml - applying to source only.'
                    if (replication_target_site | default('')) == ''
                    else 'Replication target resolved: ' ~ replication_target_site ~ ' (' ~ replication_target_path ~ ').') }}
-      when: apply_to_target | default(false) and (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
+      when: inp.apply_to_target | default(false) and (_original_hard_limit_gb | float | round(2)) != (inp.new_quota_gb | int | round(2))
 
     - name: Check whether the target quota actually exists
       when: >-
-        (apply_to_target | default(false)) and (replication_found | default(false))
+        (inp.apply_to_target | default(false)) and (replication_found | default(false))
         and (replication_target_site | default('')) != ''
-        and (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
+        and (_original_hard_limit_gb | float | round(2)) != (inp.new_quota_gb | int | round(2))
       block:
         - name: Resolve target site connection details
           ansible.builtin.set_fact:
@@ -194,8 +210,8 @@
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
             path: "{{ replication_target_path }}"
-            quota_type: "{{ quota_type }}"
-            access_zone: "{{ access_zone }}"
+            quota_type: "{{ inp.quota_type }}"
+            access_zone: "{{ inp.access_zone }}"
             state: "present"
           check_mode: true
           register: quota_target_before
@@ -203,7 +219,7 @@
         - name: Report if the target quota is missing
           ansible.builtin.debug:
             msg: >-
-              No {{ quota_type }} quota found at {{ replication_target_path }}
+              No {{ inp.quota_type }} quota found at {{ replication_target_path }}
               on {{ target_site_obj.onefs_host }} (the replication target) -
               applying to source only.
           when: (quota_target_before.quota_details | default({}, true) | length == 0)
@@ -217,36 +233,36 @@
     - name: Resolve whether we'll actually touch the target this run
       ansible.builtin.set_fact:
         _apply_to_target_effective: >-
-          {{ (apply_to_target | default(false)) and (replication_found | default(false))
+          {{ (inp.apply_to_target | default(false)) and (replication_found | default(false))
              and (replication_target_site | default('')) != ''
              and (quota_target_before is defined)
              and ((quota_target_before.quota_details | default({}, true) | length > 0)) }}
 
     - block:
-        - name: "[{{ quota_path }}] (source) Set hard limit to {{ new_quota_gb }}GB"
+        - name: "[{{ inp.quota_path }}] (source) Set hard limit to {{ inp.new_quota_gb }}GB"
           dellemc.powerscale.smartquota:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
             verify_ssl: "{{ site.verify_ssl | default(false) }}"
             api_user: "{{ site.api_user }}"
             api_password: "{{ site.api_password }}"
-            path: "{{ quota_path }}"
-            quota_type: "{{ quota_type }}"
-            access_zone: "{{ access_zone }}"
+            path: "{{ inp.quota_path }}"
+            quota_type: "{{ inp.quota_type }}"
+            access_zone: "{{ inp.access_zone }}"
             quota:
-              hard_limit_size: "{{ new_quota_gb }}"
+              hard_limit_size: "{{ inp.new_quota_gb }}"
               cap_unit: "GB"
             state: "present"
           register: quota_change
 
-        - name: "[{{ quota_path }}] Source result"
+        - name: "[{{ inp.quota_path }}] Source result"
           ansible.builtin.debug:
             msg: >-
-              {{ quota_path }}: hard limit changed from {{ _original_hard_limit_gb }}GB
-              to {{ new_quota_gb }}GB -
+              {{ inp.quota_path }}: hard limit changed from {{ _original_hard_limit_gb }}GB
+              to {{ inp.new_quota_gb }}GB -
               {{ 'changed' if quota_change.changed else 'already in desired state, no change' }}.
 
-        - name: "[{{ replication_target_path | default('') }}] (target) Set hard limit to {{ new_quota_gb }}GB"
+        - name: "[{{ replication_target_path | default('') }}] (target) Set hard limit to {{ inp.new_quota_gb }}GB"
           dellemc.powerscale.smartquota:
             onefs_host: "{{ target_site_obj.onefs_host }}"
             port_no: "{{ target_site_obj.port_no | default(8080) }}"
@@ -254,10 +270,10 @@
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
             path: "{{ replication_target_path }}"
-            quota_type: "{{ quota_type }}"
-            access_zone: "{{ access_zone }}"
+            quota_type: "{{ inp.quota_type }}"
+            access_zone: "{{ inp.access_zone }}"
             quota:
-              hard_limit_size: "{{ new_quota_gb }}"
+              hard_limit_size: "{{ inp.new_quota_gb }}"
               cap_unit: "GB"
             state: "present"
           register: quota_target_change
@@ -267,21 +283,21 @@
           ansible.builtin.debug:
             msg: >-
               {{ replication_target_path }} ({{ target_site_obj.onefs_host }}): hard limit changed from
-              {{ _target_original_hard_limit_gb }}GB to {{ new_quota_gb }}GB -
+              {{ _target_original_hard_limit_gb }}GB to {{ inp.new_quota_gb }}GB -
               {{ 'changed' if quota_target_change.changed else 'already in desired state, no change' }}.
           when: _apply_to_target_effective
 
       rescue:
-        - name: "ROLLBACK [{{ quota_path }}] (source) - restore original hard limit"
+        - name: "ROLLBACK [{{ inp.quota_path }}] (source) - restore original hard limit"
           dellemc.powerscale.smartquota:
             onefs_host: "{{ site.onefs_host }}"
             port_no: "{{ site.port_no | default(8080) }}"
             verify_ssl: "{{ site.verify_ssl | default(false) }}"
             api_user: "{{ site.api_user }}"
             api_password: "{{ site.api_password }}"
-            path: "{{ quota_path }}"
-            quota_type: "{{ quota_type }}"
-            access_zone: "{{ access_zone }}"
+            path: "{{ inp.quota_path }}"
+            quota_type: "{{ inp.quota_type }}"
+            access_zone: "{{ inp.access_zone }}"
             quota:
               hard_limit_size: "{{ _original_hard_limit_gb }}"
               cap_unit: "GB"
@@ -297,8 +313,8 @@
             api_user: "{{ target_site_obj.api_user }}"
             api_password: "{{ target_site_obj.api_password }}"
             path: "{{ replication_target_path }}"
-            quota_type: "{{ quota_type }}"
-            access_zone: "{{ access_zone }}"
+            quota_type: "{{ inp.quota_type }}"
+            access_zone: "{{ inp.access_zone }}"
             quota:
               hard_limit_size: "{{ _target_original_hard_limit_gb }}"
               cap_unit: "GB"
@@ -310,9 +326,25 @@
         - name: Fail the play - report rollback outcome
           ansible.builtin.fail:
             msg: >-
-              The quota change on {{ quota_path }} failed. Source rollback
+              The quota change on {{ inp.quota_path }} failed. Source rollback
               {{ 'succeeded' if not rollback_source_result.failed
                  else 'ALSO FAILED - manual verification/intervention needed' }}.
               {{ ('Target rollback ' ~ ('succeeded' if not rollback_target_result.failed else 'ALSO FAILED - manual verification/intervention needed') ~ '.')
                  if _apply_to_target_effective else '' }}
-      when: (_original_hard_limit_gb | float | round(2)) != (new_quota_gb | int | round(2))
+      when: (_original_hard_limit_gb | float | round(2)) != (inp.new_quota_gb | int | round(2))
+
+    - name: RESULT
+      ansible.builtin.include_role:
+        name: run_result
+      vars:
+        result_title: "Manage Quota - {{ inp.target_site }} {{ inp.quota_path }}"
+        result_status: "{{ 'CHANGED' if (quota_change.changed | default(false)) or (quota_target_change.changed | default(false)) else 'NO CHANGE' }}"
+        result_lines:
+          - "{{ inp.target_site }} ({{ site.onefs_host }}): hard limit {{ _original_hard_limit_gb | float | round(2) }}GB -> {{ inp.new_quota_gb }}GB - {{ 'CHANGED' if (quota_change.changed | default(false)) else 'no change needed' }}"
+          - "{{ (('DR ' ~ target_site_obj.onefs_host ~ ' ' ~ (replication_target_path | default('')) ~ ': ' ~ ('CHANGED' if (quota_target_change.changed | default(false)) else 'no change needed'))
+                if (_apply_to_target_effective | default(false) | bool)
+                else ('DR target: not changed - '
+                      ~ ('no SyncIQ policy covers this path' if not (replication_found | default(false) | bool)
+                         else ('policy target is not a site in sites.yml' if (replication_target_site | default('')) == ''
+                               else 'no matching object on the target'))
+                      if (inp.apply_to_target | default(false) | bool) else 'DR target: not requested')) }}"
