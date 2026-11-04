@@ -207,7 +207,8 @@
         share_name: "{{ _smb_name }}"
         state: "present"
       register: source_smb
-      ignore_errors: true
+      # existence probe: 'not found' is a normal answer - read from the result, don't show it as an error
+      failed_when: false
       when: (_smb_given | bool)
 
     - name: Fail fast if smb_share_name was given but doesn't exist on source
@@ -391,7 +392,8 @@
         share_name: "{{ _smb_name }}"
         state: "present"
       register: target_smb
-      ignore_errors: true
+      # existence probe: 'not found' is a normal answer - read from the result, don't show it as an error
+      failed_when: false
       when: (_smb_given | bool)
 
     - name: "[target] Check whether a matching quota already exists"
@@ -419,7 +421,8 @@
         policy_name: "{{ _policy_name }}"
         state: "present"
       register: policy_before
-      ignore_errors: true
+      # existence probe: 'not found' is a normal answer - read from the result, don't show it as an error
+      failed_when: false
 
     # ---- Plan (always printed; a dry run stops here) ----
     - name: Build the plan

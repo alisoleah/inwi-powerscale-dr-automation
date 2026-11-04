@@ -180,7 +180,8 @@
         access_zone: "{{ inp.access_zone }}"
         state: "present"
       register: smb_before
-      ignore_errors: true
+      # existence probe: 'not found' is a normal answer - read from the result, don't show it as an error
+      failed_when: false
 
     - name: Fail fast if the share doesn't exist (or another error occurred)
       ansible.builtin.fail:
@@ -300,7 +301,8 @@
             access_zone: "{{ inp.access_zone }}"
             state: "present"
           register: smb_target_before
-          ignore_errors: true
+          # existence probe: 'not found' is a normal answer - read from the result, don't show it as an error
+          failed_when: false
 
         - name: Report if the target share is missing
           ansible.builtin.debug:
